@@ -1,0 +1,229 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  EMPLOYEE
+}
+
+enum MetricType {
+  NUMBER
+  PERCENT
+  CURRENCY
+}
+
+enum SubmissionStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum ReviewStatus {
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+}
+
+
+model User {
+  id           String        @id @default(cuid())
+  name         String
+  email        String        @unique
+  skills       String?       @db.Text
+  passwordHash String
+  role         Role
+  managerId    String?
+  manager      User?         @relation("UserManager", fields: [managerId], references: [id])
+  reports      User[]        @relation("UserManager")
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  createdTemplates KpiTemplate[] @relation("TemplateCreator")
+  submissions  KpiSubmission[]
+  projects     UserProject[]
+  reviews      KpiReview[]  @relation("ReviewReviewer")
+  reviewedSubmissions KpiSubmission[] @relation("SubmissionReviewer")
+  comments     KpiComment[]
+  auditLogs    AuditLog[]    @relation("AuditActor")
+  targetedAuditLogs AuditLog[] @relation("AuditTargetUser")
+}
+
+model UserProject {
+  id          String   @id @default(cuid())
+  userId      String
+
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  totalTickets Int     @default(0)
+  doneTickets  Int     @default(0)
+  overdueTickets Int   @default(0)
+  changeRequestTickets Int @default(0)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+}
+
+
+model KpiTemplate {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  formula     String?       @db.Text
+  isActive    Boolean       @default(true)
+  createdById String
+  createdBy   User          @relation("TemplateCreator", fields: [createdById], references: [id])
+  goals       KpiGoal[]
+  metrics     KpiMetric[]
+  submissions KpiSubmission[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+model KpiGoal {
+  id          String     @id @default(cuid())
+  templateId  String
+  key         String
+  name        String
+  description String?
+  formula     String?     @db.Text
+  weight      Float?
+  order       Int        @default(0)
+  template    KpiTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  metrics     KpiMetric[]
+  notes       KpiGoalNote[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([templateId, key])
+  @@index([templateId, order])
+}
+
+model KpiMetric {
+  id         String      @id @default(cuid())
+  templateId String
+  goalId     String
+  template   KpiTemplate @relation(fields: [templateId], references: [id])
+  goal       KpiGoal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  key        String
+  label      String
+  type       MetricType
+  isComputed Boolean     @default(false)
+  definition String?     @db.Text
+  formulaText String?    @db.Text
+  calcFormula String?    @db.Text
+  targetText String?     @db.Text
+  frequency  String?
+  required   Boolean     @default(true)
+  min        Float?
+  max        Float?
+  weight     Float?
+  order      Int         @default(0)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  values     KpiValue[]
+
+  @@unique([templateId, key])
+}
+
+model KpiSubmission {
+  id          String           @id @default(cuid())
+  userId      String
+  templateId  String
+  periodStart DateTime
+  periodEnd   DateTime
+  status      SubmissionStatus @default(SUBMITTED)
+  score       Float?
+  submittedAt DateTime         @default(now())
+  reviewedAt  DateTime?
+  reviewerId  String?
+  reviewer    User?            @relation("SubmissionReviewer", fields: [reviewerId], references: [id])
+  user        User             @relation(fields: [userId], references: [id])
+  template    KpiTemplate      @relation(fields: [templateId], references: [id])
+  values      KpiValue[]
+  reviews     KpiReview[]
+  comments    KpiComment[]
+  goalNotes   KpiGoalNote[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([userId, periodStart, periodEnd])
+  @@index([status, reviewedAt])
+}
+
+model KpiValue {
+  id           String        @id @default(cuid())
+  submissionId String
+  metricId     String
+  valueNumber  Float?
+  valueText    String?
+  submission   KpiSubmission @relation(fields: [submissionId], references: [id])
+  metric       KpiMetric     @relation(fields: [metricId], references: [id])
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([submissionId, metricId])
+}
+
+model KpiGoalNote {
+  id           String       @id @default(cuid())
+  submissionId String
+  goalId       String
+  note         String?      @db.Text
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  submission   KpiSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  goal         KpiGoal       @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@unique([submissionId, goalId])
+  @@index([goalId])
+}
+model KpiReview {
+  id           String       @id @default(cuid())
+  submissionId String
+  reviewerId   String
+  status       ReviewStatus
+  comment      String?      @db.Text
+  reviewedAt   DateTime     @default(now())
+
+  submission KpiSubmission @relation(fields: [submissionId], references: [id])
+  reviewer   User          @relation("ReviewReviewer", fields: [reviewerId], references: [id])
+
+  @@index([submissionId])
+  @@index([reviewerId])
+}
+
+model KpiComment {
+  id           String       @id @default(cuid())
+  submissionId String
+  authorId     String
+  message      String       @db.Text
+  createdAt    DateTime     @default(now())
+
+  submission KpiSubmission @relation(fields: [submissionId], references: [id])
+  author     User          @relation(fields: [authorId], references: [id])
+
+  @@index([submissionId])
+}
+
