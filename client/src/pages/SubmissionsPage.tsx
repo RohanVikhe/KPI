@@ -34,6 +34,8 @@ export default function SubmissionsPage() {
   const submissions = data?.submissions ?? [];
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [page, setPage] = useState(1);
 
   const statusOptions = useMemo(() => {
@@ -43,8 +45,20 @@ export default function SubmissionsPage() {
 
   const filteredSubmissions = useMemo(() => {
     const search = query.trim().toLowerCase();
+    const fromTs = fromDate ? new Date(`${fromDate}T00:00:00.000Z`).getTime() : null;
+    const toTs = toDate ? new Date(`${toDate}T23:59:59.999Z`).getTime() : null;
+
     return submissions.filter((submission) => {
       if (statusFilter !== "ALL" && submission.status !== statusFilter) {
+        return false;
+      }
+
+      const periodStartTs = new Date(submission.periodStart).getTime();
+      const periodEndTs = new Date(submission.periodEnd).getTime();
+      if (fromTs !== null && periodEndTs < fromTs) {
+        return false;
+      }
+      if (toTs !== null && periodStartTs > toTs) {
         return false;
       }
 
@@ -63,7 +77,7 @@ export default function SubmissionsPage() {
 
       return searchable.includes(search);
     });
-  }, [submissions, query, statusFilter]);
+  }, [submissions, query, statusFilter, fromDate, toDate]);
 
   const totalPages = Math.max(1, Math.ceil(filteredSubmissions.length / SUBMISSIONS_PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -75,7 +89,7 @@ export default function SubmissionsPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [query, statusFilter]);
+  }, [query, statusFilter, fromDate, toDate]);
 
   useEffect(() => {
     if (page > totalPages) {
@@ -118,6 +132,24 @@ export default function SubmissionsPage() {
               ))}
             </select>
           </label>
+          <label className="form-field">
+            <span>From</span>
+            <input
+              type="date"
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={(event) => setFromDate(event.target.value)}
+            />
+          </label>
+          <label className="form-field">
+            <span>To</span>
+            <input
+              type="date"
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={(event) => setToDate(event.target.value)}
+            />
+          </label>
         </div>
 
         <div className="table-actions">
@@ -134,6 +166,8 @@ export default function SubmissionsPage() {
             onClick={() => {
               setQuery("");
               setStatusFilter("ALL");
+              setFromDate("");
+              setToDate("");
             }}
           >
             Reset filters

@@ -116,7 +116,9 @@ export default function SubmissionDetailPage() {
   });
 
   const submission = data?.submission;
-  const canReview = user?.role === "MANAGER" || user?.role === "ADMIN";
+  const hasReviewRole = user?.role === "MANAGER" || user?.role === "ADMIN";
+  const isOwnSubmission = Boolean(user?.id && submission?.userId === user.id);
+  const canReview = hasReviewRole && !isOwnSubmission;
 
   const goalSections = useMemo(() => {
     if (!submission) return [];
@@ -551,6 +553,12 @@ export default function SubmissionDetailPage() {
               {reviewMutation.isPending ? "Submitting..." : "Submit review"}
             </button>
           </form>
+        </div>
+      )}
+
+      {hasReviewRole && isOwnSubmission && (
+        <div className="panel">
+          <div className="panel-sub">Self-review is not allowed. Ask your manager or admin to review this KPI entry.</div>
         </div>
       )}
 

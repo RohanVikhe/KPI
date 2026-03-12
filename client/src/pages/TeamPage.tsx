@@ -49,6 +49,8 @@ export default function TeamPage() {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [userFilter, setUserFilter] = useState<string>(userIdParam ?? "ALL");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [sortField, setSortField] = useState<SortField>("submittedAt");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
@@ -101,6 +103,9 @@ export default function TeamPage() {
 
   const filteredSubmissions = useMemo(() => {
     const search = query.trim().toLowerCase();
+    const fromTs = fromDate ? new Date(`${fromDate}T00:00:00.000Z`).getTime() : null;
+    const toTs = toDate ? new Date(`${toDate}T23:59:59.999Z`).getTime() : null;
+
     return submissions.filter((submission) => {
       if (statusFilter !== "ALL" && submission.status !== statusFilter) {
         return false;
@@ -108,6 +113,16 @@ export default function TeamPage() {
       if (userFilter !== "ALL" && submission.user?.id !== userFilter) {
         return false;
       }
+
+      const periodStartTs = new Date(submission.periodStart).getTime();
+      const periodEndTs = new Date(submission.periodEnd).getTime();
+      if (fromTs !== null && periodEndTs < fromTs) {
+        return false;
+      }
+      if (toTs !== null && periodStartTs > toTs) {
+        return false;
+      }
+
       if (!search) {
         return true;
       }
@@ -122,7 +137,7 @@ export default function TeamPage() {
 
       return searchable.includes(search);
     });
-  }, [submissions, query, statusFilter, userFilter]);
+  }, [submissions, query, statusFilter, userFilter, fromDate, toDate]);
 
   const sortedSubmissions = useMemo(() => {
     const direction = sortDirection === "asc" ? 1 : -1;
@@ -194,7 +209,7 @@ export default function TeamPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [query, statusFilter, userFilter, sortField, sortDirection]);
+  }, [query, statusFilter, userFilter, fromDate, toDate, sortField, sortDirection]);
 
   useEffect(() => {
     if (page > totalPages) {
@@ -250,6 +265,24 @@ export default function TeamPage() {
             </select>
           </label>
           <label className="form-field">
+            <span>From</span>
+            <input
+              type="date"
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={(event) => setFromDate(event.target.value)}
+            />
+          </label>
+          <label className="form-field">
+            <span>To</span>
+            <input
+              type="date"
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={(event) => setToDate(event.target.value)}
+            />
+          </label>
+          <label className="form-field">
             <span>Sort by</span>
             <select value={sortField} onChange={(event) => setSortField(event.target.value as SortField)}>
               <option value="submittedAt">Submitted On</option>
@@ -285,6 +318,8 @@ export default function TeamPage() {
               setQuery("");
               setStatusFilter("ALL");
               handleUserFilterChange("ALL");
+              setFromDate("");
+              setToDate("");
               setSortField("submittedAt");
               setSortDirection("desc");
             }}

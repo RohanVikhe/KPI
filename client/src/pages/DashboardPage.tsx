@@ -18,6 +18,7 @@ import MessageToast from "../components/MessageToast.tsx";
 
 const COLORS = ["#f29d38", "#44d9e6", "#7c8cff", "#f468a5", "#6bf0a1"];
 const ORG_ROWS_PER_PAGE = 12;
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 type ProjectCountFormState = {
   totalTickets: string;
@@ -37,6 +38,23 @@ type DashboardUserProjects = Pick<User, "id" | "name" | "email" | "role" | "isAc
   projects?: Project[];
 };
 
+type MonthlyGoalScore = {
+  goalId: string;
+  key: string;
+  name: string;
+  score: number;
+};
+
+type MonthlySubmission = {
+  monthKey: string;
+  periodStart: string;
+  periodEnd: string;
+  score: number;
+  goalScores: MonthlyGoalScore[];
+  sourceSubmissions: number;
+  latestTemplateName: string;
+};
+
 const emptyProjectCounts: ProjectCountFormState = {
   totalTickets: "0",
   doneTickets: "0",
@@ -49,6 +67,48 @@ function formatDate(value: string) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatMonthLabel(monthKey: string) {
+  const [yearText, monthText] = monthKey.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) {
+    return monthKey;
+  }
+  const date = new Date(Date.UTC(year, month - 1, 1));
+  return date.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+}
+
+function toUtcDateOnly(value: string) {
+  const dayValue = value.slice(0, 10);
+  const date = new Date(`${dayValue}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return date;
+}
+
+function utcMonthStart(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function utcMonthEnd(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
+}
+
+function utcMonthKey(date: Date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function addUtcDays(date: Date, days: number) {
+  const next = new Date(date.getTime());
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function daySpanInclusive(start: Date, end: Date) {
+  return Math.floor((end.getTime() - start.getTime()) / DAY_IN_MS) + 1;
+}
+
 function normalizeScore(score: number | null | undefined) {
   if (score === null || score === undefined || Number.isNaN(score)) return 0;
   const scaled = score >= 0 && score <= 1 ? score * 100 : score;
@@ -56,6 +116,20 @@ function normalizeScore(score: number | null | undefined) {
     return Math.min(100, Math.max(0, (scaled / 5) * 100));
   }
   return Math.min(100, Math.max(0, scaled));
+}
+
+function formatChartValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toFixed(2);
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed.toFixed(2);
+    }
+    return value;
+  }
+  return String(value ?? "");
 }
 
 function parseCount(value: string) {
@@ -80,7 +154,7 @@ export default function DashboardPage() {
   const canViewTeamProjects = user?.role === "MANAGER" || user?.role === "ADMIN";
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["submissions", "me", "approved"],
+    queryKey: ["submissions", "me", "dashboard", "approved"],
     queryFn: () => apiFetch<{ submissions: Submission[] }>("/submissions/me?approvedOnly=true"),
   });
   const { data: projectsData } = useQuery({
@@ -100,15 +174,131 @@ export default function DashboardPage() {
       ),
   });
 
-  const submissions = data?.submissions ?? [];
+  const submissions = (data?.submissions ?? []).filter((submission) => submission.status === "APPROVED");
+  const monthlySubmissions = useMemo(() => {
+    type GoalAccumulator = {
+      goalId: string;
+      key: string;
+      name: string;
+      weightedTotal: number;
+      totalDays: number;
+    };
+
+    type MonthAccumulator = {
+      monthKey: string;
+      coveredStart: Date;
+      coveredEnd: Date;
+      weightedScoreTotal: number;
+      totalDays: number;
+      goalById: Map<string, GoalAccumulator>;
+      latestPeriodEndTs: number;
+      latestTemplateName: string;
+      sourceSubmissions: number;
+    };
+
+    const buckets = new Map<string, MonthAccumulator>();
+
+    submissions.forEach((submission) => {
+      const start = toUtcDateOnly(submission.periodStart);
+      const end = toUtcDateOnly(submission.periodEnd);
+      if (!start || !end || start > end) {
+        return;
+      }
+
+      let cursor = new Date(start.getTime());
+      while (cursor <= end) {
+        const monthStart = utcMonthStart(cursor);
+        const monthEnd = utcMonthEnd(cursor);
+        const segmentStart = start > monthStart ? start : monthStart;
+        const segmentEnd = end < monthEnd ? end : monthEnd;
+        const daysCovered = daySpanInclusive(segmentStart, segmentEnd);
+
+        if (daysCovered <= 0) {
+          cursor = addUtcDays(monthEnd, 1);
+          continue;
+        }
+
+        const key = utcMonthKey(monthStart);
+        let bucket = buckets.get(key);
+        if (!bucket) {
+          bucket = {
+            monthKey: key,
+            coveredStart: segmentStart,
+            coveredEnd: segmentEnd,
+            weightedScoreTotal: 0,
+            totalDays: 0,
+            goalById: new Map<string, GoalAccumulator>(),
+            latestPeriodEndTs: Number.NEGATIVE_INFINITY,
+            latestTemplateName: "",
+            sourceSubmissions: 0,
+          };
+          buckets.set(key, bucket);
+        } else {
+          if (segmentStart < bucket.coveredStart) {
+            bucket.coveredStart = segmentStart;
+          }
+          if (segmentEnd > bucket.coveredEnd) {
+            bucket.coveredEnd = segmentEnd;
+          }
+        }
+
+        bucket.weightedScoreTotal += (submission.score ?? 0) * daysCovered;
+        bucket.totalDays += daysCovered;
+        bucket.sourceSubmissions += 1;
+
+        const submissionPeriodEndTs = new Date(submission.periodEnd).getTime();
+        if (Number.isFinite(submissionPeriodEndTs) && submissionPeriodEndTs >= bucket.latestPeriodEndTs) {
+          bucket.latestPeriodEndTs = submissionPeriodEndTs;
+          bucket.latestTemplateName = submission.template.name;
+        }
+
+        submission.goalScores?.forEach((goal) => {
+          const goalScore = goal.score ?? 0;
+          const existingGoal = bucket.goalById.get(goal.goalId);
+          if (!existingGoal) {
+            bucket.goalById.set(goal.goalId, {
+              goalId: goal.goalId,
+              key: goal.key,
+              name: goal.name,
+              weightedTotal: goalScore * daysCovered,
+              totalDays: daysCovered,
+            });
+            return;
+          }
+          existingGoal.weightedTotal += goalScore * daysCovered;
+          existingGoal.totalDays += daysCovered;
+        });
+
+        cursor = addUtcDays(monthEnd, 1);
+      }
+    });
+
+    return Array.from(buckets.values())
+      .map<MonthlySubmission>((bucket) => ({
+        monthKey: bucket.monthKey,
+        periodStart: bucket.coveredStart.toISOString(),
+        periodEnd: bucket.coveredEnd.toISOString(),
+        score: bucket.totalDays > 0 ? bucket.weightedScoreTotal / bucket.totalDays : 0,
+        goalScores: Array.from(bucket.goalById.values()).map((goal) => ({
+          goalId: goal.goalId,
+          key: goal.key,
+          name: goal.name,
+          score: goal.totalDays > 0 ? goal.weightedTotal / goal.totalDays : 0,
+        })),
+        sourceSubmissions: bucket.sourceSubmissions,
+        latestTemplateName: bucket.latestTemplateName || "Multiple templates",
+      }))
+      .sort((a, b) => b.periodEnd.localeCompare(a.periodEnd));
+  }, [submissions]);
+
   const projects = projectsData?.projects ?? [];
-  const latest = submissions[0];
+  const latest = monthlySubmissions[0];
   const goalSource = useMemo(() => {
     const withMultipleGoals =
       submissions.find((item) => (item.goalScores?.length ?? 0) > 1) ??
       submissions.find((item) => (item.template.goals?.length ?? 0) > 1);
-    return withMultipleGoals ?? latest;
-  }, [submissions, latest]);
+    return withMultipleGoals ?? submissions[0];
+  }, [submissions]);
   const averagedGoalScores = useMemo(() => {
     const aggregate = new Map<
       string,
@@ -122,13 +312,13 @@ export default function DashboardPage() {
     >();
     const goalOrder = new Map<string, number>();
 
-    submissions.forEach((submission) => {
-      submission.goalScores?.forEach((goal, index) => {
+    monthlySubmissions.forEach((submission) => {
+      submission.goalScores.forEach((goal, index) => {
         if (!goalOrder.has(goal.goalId)) {
           goalOrder.set(goal.goalId, index);
         }
         const current = aggregate.get(goal.goalId);
-        const score = goal.score ?? 0;
+        const score = goal.score;
         if (!current) {
           aggregate.set(goal.goalId, {
             goalId: goal.goalId,
@@ -152,27 +342,27 @@ export default function DashboardPage() {
         score: item.count > 0 ? item.total / item.count : 0,
       }))
       .sort((a, b) => (goalOrder.get(a.goalId) ?? 0) - (goalOrder.get(b.goalId) ?? 0));
-  }, [submissions]);
+  }, [monthlySubmissions]);
 
   const stats = useMemo(() => {
-    if (submissions.length === 0) {
+    if (monthlySubmissions.length === 0) {
       return { avgScore: 0, bestScore: 0 };
     }
-    const scores = submissions.map((item) => item.score ?? 0);
+    const scores = monthlySubmissions.map((item) => item.score);
     const avgScore = scores.reduce((acc, cur) => acc + cur, 0) / scores.length;
     const bestScore = Math.max(...scores);
     return { avgScore, bestScore };
-  }, [submissions]);
+  }, [monthlySubmissions]);
 
   const trendData = useMemo(() => {
-    return submissions
+    return monthlySubmissions
       .slice()
       .reverse()
       .map((item) => ({
-        date: formatDate(item.periodEnd),
-        score: item.score ?? 0,
+        date: formatMonthLabel(item.monthKey),
+        score: item.score,
       }));
-  }, [submissions]);
+  }, [monthlySubmissions]);
 
   const pieData = useMemo(() => {
     if (averagedGoalScores.length > 0) {
@@ -532,7 +722,7 @@ export default function DashboardPage() {
         <div className="stat-card">
           <div className="stat-label">Average KPI</div>
           <div className="stat-value">{stats.avgScore.toFixed(2)}</div>
-          <div className="stat-sub">Across all submitted periods</div>
+          <div className="stat-sub">Across monthly periods</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Best KPI</div>
@@ -541,8 +731,8 @@ export default function DashboardPage() {
         </div>
         <div className="stat-card">
           <div className="stat-label">Latest Period</div>
-          <div className="stat-value">{latest ? formatDate(latest.periodEnd) : "--"}</div>
-          <div className="stat-sub">{latest ? latest.template.name : "No submissions yet"}</div>
+          <div className="stat-value">{latest ? formatMonthLabel(latest.monthKey) : "--"}</div>
+          <div className="stat-sub">{latest ? latest.latestTemplateName : "No submissions yet"}</div>
         </div>
         <button type="button" className="stat-card stat-card-button" onClick={showActiveProjectsFromCard}>
           <div className="stat-label">Active Projects</div>
@@ -551,24 +741,24 @@ export default function DashboardPage() {
         </button>
       </section>
 
-      {submissions.length === 0 ? (
+      {monthlySubmissions.length === 0 ? (
         <div className="panel empty-state">
-          <h3>No approved KPI submissions yet</h3>
-          <p>Your dashboard updates after your KPI is approved by a manager or admin.</p>
+          <h3>No KPI submissions yet</h3>
+          <p>Your dashboard updates only after manager or admin approval.</p>
         </div>
       ) : (
         <section className="chart-grid">
           <div className="panel chart-card">
             <div className="panel-header">
               <h3>KPI Trend</h3>
-              <span className="panel-sub">Score movement across periods</span>
+              <span className="panel-sub">Score movement across months</span>
             </div>
             <div className="chart">
               <ResponsiveContainer width="100%" height={260}>
                 <LineChart data={trendData}>
                   <XAxis dataKey="date" tickLine={false} axisLine={false} />
                   <YAxis tickLine={false} axisLine={false} />
-                  <Tooltip />
+                  <Tooltip formatter={(value) => formatChartValue(value)} />
                   <Line type="monotone" dataKey="score" stroke="#f29d38" strokeWidth={3} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -580,8 +770,8 @@ export default function DashboardPage() {
               <h3>Goal Progress</h3>
               <span className="panel-sub">
                 {averagedGoalScores.length > 0
-                  ? `Goal-wise score average across ${submissions.length} approved period${
-                      submissions.length === 1 ? "" : "s"
+                  ? `Goal-wise score average across ${monthlySubmissions.length} month${
+                      monthlySubmissions.length === 1 ? "" : "s"
                     }`
                   : `Goal-wise score snapshot${goalSource?.periodEnd ? ` | ${formatDate(goalSource.periodEnd)}` : ""}`}
               </span>
@@ -622,7 +812,7 @@ export default function DashboardPage() {
                           <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                         ))}
                       </Pie>
-                      <Tooltip />
+                      <Tooltip formatter={(value) => formatChartValue(value)} />
                     </PieChart>
                   </ResponsiveContainer>
                 )}

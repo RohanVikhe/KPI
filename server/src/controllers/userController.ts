@@ -1,5 +1,14 @@
 import type { Request, Response } from "express";
-import { listUsers, listTeamUsers, updateUser, updateMyProfile, changePassword, deactivateUser, deleteUserKpiData } from "../services/userService.js";
+import {
+  listUsers,
+  listTeamUsers,
+  updateUser,
+  updateMyProfile,
+  changePassword,
+  deactivateUser,
+  listUserKpiEntries,
+  deleteUserKpiEntry,
+} from "../services/userService.js";
 import { AppError } from "../utils/errors.js";
 
 export async function listUsersHandler(_req: Request, res: Response) {
@@ -64,7 +73,17 @@ export async function deleteUserKpiDataHandler(req: Request, res: Response) {
     throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
   }
 
-  const { id } = req.params as { id: string };
-  const result = await deleteUserKpiData(req.user, id);
+  const { id, submissionId } = req.params as { id: string; submissionId: string };
+  const result = await deleteUserKpiEntry(req.user, id, submissionId);
   return res.json(result);
+}
+
+export async function listUserKpiEntriesHandler(req: Request, res: Response) {
+  if (!req.user) {
+    throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
+  }
+
+  const { id } = req.params as { id: string };
+  const submissions = await listUserKpiEntries(req.user, id);
+  return res.json({ submissions });
 }

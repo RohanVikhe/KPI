@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as XLSX from "xlsx";
-import { apiFetch } from "../lib/api.ts";
+import { ApiError, apiFetch } from "../lib/api.ts";
 import { evaluateFormula } from "../lib/formula.ts";
 import type { Template } from "../lib/types.ts";
 import MessageToast from "../components/MessageToast.tsx";
@@ -59,6 +59,16 @@ const parseInputNumber = (value: string | undefined) => {
   const parsed = Number(cleaned);
   if (Number.isNaN(parsed)) return null;
   return parsed;
+};
+
+const getSubmissionErrorMessage = (error: unknown) => {
+  if (error instanceof ApiError && error.code === "PERIOD_OVERLAP") {
+    return "A KPI entry already exists for an overlapping period. Use non-overlapping dates or ask your manager/admin to remove the conflicting entry.";
+  }
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return "Unable to save submission.";
 };
 
 const formatMetricValue = (value: number | null | undefined, type: string) => {
@@ -568,8 +578,8 @@ export default function NewSubmissionPage() {
       setGoalNotes({});
       queryClient.invalidateQueries({ queryKey: ["submissions", "me"] });
     },
-    onError: (error: any) => {
-      const message = error?.message ?? "Unable to save submission.";
+    onError: (error: unknown) => {
+      const message = getSubmissionErrorMessage(error);
       showToast("error", message);
     },
   });
@@ -1149,7 +1159,7 @@ export default function NewSubmissionPage() {
         });
         successCount += 1;
       } catch (err) {
-        errors.push(`Row ${rowIndex + 2}: ${(err as Error).message ?? "Submit failed."}`);
+        errors.push(`Row ${rowIndex + 2}: ${getSubmissionErrorMessage(err)}`);
       }
     }
 
@@ -1202,7 +1212,7 @@ export default function NewSubmissionPage() {
       queryClient.invalidateQueries({ queryKey: ["submissions", "me"] });
       showToast("success", "Imported 1 submission successfully.");
     } catch (err) {
-      const message = (err as Error).message ?? "Unable to read the uploaded file.";
+      const message = getSubmissionErrorMessage(err);
       showToast("error", message);
     } finally {
       setImporting(false);

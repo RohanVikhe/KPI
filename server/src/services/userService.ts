@@ -218,6 +218,27 @@ type RequestingUser = {
   role: Role;
 };
 
+async function assertKpiManagementAccess(requester: RequestingUser, targetId: string) {
+  const target = await prisma.user.findUnique({
+    where: { id: targetId },
+    select: { id: true, managerId: true },
+  });
+
+  if (!target) {
+    throw new AppError("User not found", 404, "USER_NOT_FOUND");
+  }
+
+  if (requester.role === Role.MANAGER) {
+    if (target.managerId !== requester.id) {
+      throw new AppError("Insufficient permissions", 403, "FORBIDDEN");
+    }
+  } else if (requester.role !== Role.ADMIN) {
+    throw new AppError("Insufficient permissions", 403, "FORBIDDEN");
+  }
+
+  return target;
+}
+
 export async function deactivateUser(requester: RequestingUser, targetId: string) {
   const target = await prisma.user.findUnique({
     where: { id: targetId },
@@ -247,42 +268,48 @@ export async function deactivateUser(requester: RequestingUser, targetId: string
   });
 }
 
-export async function deleteUserKpiData(requester: RequestingUser, targetId: string) {
-  const target = await prisma.user.findUnique({
-    where: { id: targetId },
-    select: { id: true, managerId: true },
-  });
+export async function listUserKpiEntries(requester: RequestingUser, targetId: string) {
+  await assertKpiManagementAccess(requester, targetId);
 
-  if (!target) {
-    throw new AppError("User not found", 404, "USER_NOT_FOUND");
-  }
-
-  if (requester.role === Role.MANAGER) {
-    if (target.managerId !== requester.id) {
-      throw new AppError("Insufficient permissions", 403, "FORBIDDEN");
-    }
-  } else if (requester.role !== Role.ADMIN) {
-    throw new AppError("Insufficient permissions", 403, "FORBIDDEN");
-  }
-
-  const submissions = await prisma.kpiSubmission.findMany({
+  return prisma.kpiSubmission.findMany({
     where: { userId: targetId },
+    orderBy: { periodEnd: "desc" },
+    select: {
+      id: true,
+      periodStart: true,
+      periodEnd: true,
+      status: true,
+      score: true,
+      submittedAt: true,
+      template: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  });
+}
+
+export async function deleteUserKpiEntry(requester: RequestingUser, targetId: string, submissionId: string) {
+  await assertKpiManagementAccess(requester, targetId);
+
+  const submission = await prisma.kpiSubmission.findFirst({
+    where: { id: submissionId, userId: targetId },
     select: { id: true },
   });
 
-  const submissionIds = submissions.map((submission) => submission.id);
-
-  if (submissionIds.length === 0) {
-    return { deletedSubmissions: 0 };
+  if (!submission) {
+    throw new AppError("KPI submission not found", 404, "SUBMISSION_NOT_FOUND");
   }
 
   await prisma.$transaction(async (tx) => {
-    await tx.kpiValue.deleteMany({ where: { submissionId: { in: submissionIds } } });
-    await tx.kpiGoalNote.deleteMany({ where: { submissionId: { in: submissionIds } } });
-    await tx.kpiComment.deleteMany({ where: { submissionId: { in: submissionIds } } });
-    await tx.kpiReview.deleteMany({ where: { submissionId: { in: submissionIds } } });
-    await tx.kpiSubmission.deleteMany({ where: { id: { in: submissionIds } } });
+    await tx.kpiValue.deleteMany({ where: { submissionId } });
+    await tx.kpiGoalNote.deleteMany({ where: { submissionId } });
+    await tx.kpiComment.deleteMany({ where: { submissionId } });
+    await tx.kpiReview.deleteMany({ where: { submissionId } });
+    await tx.kpiSubmission.delete({ where: { id: submissionId } });
   });
 
-  return { deletedSubmissions: submissionIds.length };
+  return { deletedSubmissionId: submission.id };
 }

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { ApiError, apiFetch } from "../lib/api.ts";
 import { useAuth } from "../lib/auth.tsx";
-import type { Role, User } from "../lib/types.ts";
+import type { Role, SubmissionStatus, User } from "../lib/types.ts";
 import MessageToast from "../components/MessageToast.tsx";
 
 type CreateUserPayload = {
@@ -11,6 +12,19 @@ type CreateUserPayload = {
   password: string;
   role?: Role;
   managerId?: string | null;
+};
+
+type UserKpiEntry = {
+  id: string;
+  periodStart: string;
+  periodEnd: string;
+  status: SubmissionStatus;
+  score?: number | null;
+  submittedAt: string;
+  template: {
+    id: string;
+    name: string;
+  };
 };
 
 type UserSortKey = "name" | "role" | "manager" | "status";
@@ -32,6 +46,11 @@ function getInitials(name: string) {
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 export default function UsersPage() {
@@ -62,7 +81,8 @@ export default function UsersPage() {
   });
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [togglingActiveId, setTogglingActiveId] = useState<string | null>(null);
-  const [clearingId, setClearingId] = useState<string | null>(null);
+  const [managingKpiUser, setManagingKpiUser] = useState<User | null>(null);
+  const [deletingKpiEntryId, setDeletingKpiEntryId] = useState<string | null>(null);
   const [updatingAccessId, setUpdatingAccessId] = useState<string | null>(null);
   const [roleDraftByUserId, setRoleDraftByUserId] = useState<Record<string, Role>>({});
   const [managerDraftByUserId, setManagerDraftByUserId] = useState<Record<string, string>>({});
@@ -73,6 +93,18 @@ export default function UsersPage() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [usersPage, setUsersPage] = useState(1);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const {
+    data: userKpiEntriesData,
+    isLoading: isUserKpiEntriesLoading,
+    error: userKpiEntriesError,
+  } = useQuery({
+    queryKey: ["users", "kpi-entries", managingKpiUser?.id],
+    queryFn: () => apiFetch<{ submissions: UserKpiEntry[] }>(`/users/${managingKpiUser!.id}/kpi`),
+    enabled: Boolean(managingKpiUser?.id),
+  });
+
+  const userKpiEntries = userKpiEntriesData?.submissions ?? [];
 
   const showToast = (type: "success" | "error", message: string) => {
     setToast({ type, message });
@@ -162,27 +194,23 @@ export default function UsersPage() {
     },
   });
 
-  const clearKpiMutation = useMutation({
-    mutationFn: (id: string) =>
-      apiFetch<{ deletedSubmissions: number }>(`/users/${id}/kpi`, {
+  const deleteKpiEntryMutation = useMutation({
+    mutationFn: ({ userId, submissionId }: { userId: string; submissionId: string }) =>
+      apiFetch<{ deletedSubmissionId: string }>(`/users/${userId}/kpi/${submissionId}`, {
         method: "DELETE",
       }),
-    onSuccess: (data) => {
-      const count = data?.deletedSubmissions ?? 0;
-      const message =
-        count > 0
-          ? `Deleted ${count} KPI submission${count === 1 ? "" : "s"}.`
-          : "No KPI data to delete.";
-      showToast("success", message);
+    onSuccess: (_data, variables) => {
+      showToast("success", "KPI entry deleted.");
+      queryClient.invalidateQueries({ queryKey: ["users", "kpi-entries", variables.userId] });
       queryClient.invalidateQueries({ queryKey: ["submissions"] });
     },
     onError: (err: unknown) => {
       if (err instanceof ApiError) {
-        const message = err.message || "Failed to delete KPI data.";
+        const message = err.message || "Failed to delete KPI entry.";
         showToast("error", message);
         return;
       }
-      showToast("error", "Failed to delete KPI data.");
+      showToast("error", "Failed to delete KPI entry.");
     },
   });
 
@@ -283,14 +311,30 @@ export default function UsersPage() {
     );
   };
 
-  const handleClearKpi = (target: User) => {
-    if (!window.confirm(`Delete KPI data for ${target.name}? This will remove all submissions, reviews, comments, notes, and values.`)) {
+  const handleManageKpi = (target: User) => {
+    setManagingKpiUser(target);
+  };
+
+  const handleDeleteKpiEntry = (entry: UserKpiEntry) => {
+    if (!managingKpiUser) {
       return;
     }
-    setClearingId(target.id);
-    clearKpiMutation.mutate(target.id, {
-      onSettled: () => setClearingId(null),
-    });
+
+    const periodLabel = `${formatDate(entry.periodStart)} - ${formatDate(entry.periodEnd)}`;
+    if (!window.confirm(`Delete KPI entry "${entry.template.name}" (${periodLabel}) for ${managingKpiUser.name}?`)) {
+      return;
+    }
+
+    setDeletingKpiEntryId(entry.id);
+    deleteKpiEntryMutation.mutate(
+      {
+        userId: managingKpiUser.id,
+        submissionId: entry.id,
+      },
+      {
+        onSettled: () => setDeletingKpiEntryId(null),
+      }
+    );
   };
 
   const handleManagerDraftChange = (targetId: string, managerId: string) => {
@@ -596,7 +640,7 @@ export default function UsersPage() {
               const canAdminToggleActive = isAdmin && !isSelf;
               const canManagerDeactivate =
                 item.isActive && isManager && item.role === "EMPLOYEE" && item.managerId === user?.id;
-              const canClearKpi = isAdmin || (isManager && item.role === "EMPLOYEE" && item.managerId === user?.id);
+              const canManageKpi = isAdmin || (isManager && item.role === "EMPLOYEE" && item.managerId === user?.id);
               const canEditAccess = isAdmin && !isSelf;
               const selectedRole = roleDraftByUserId[item.id] ?? item.role;
               const selectedManagerId = managerDraftByUserId[item.id] ?? (item.managerId ?? "");
@@ -663,7 +707,7 @@ export default function UsersPage() {
                     </span>
                   </div>
                   <div>
-                    {canEditAccess || canAdminToggleActive || canManagerDeactivate || canClearKpi ? (
+                    {canEditAccess || canAdminToggleActive || canManagerDeactivate || canManageKpi ? (
                       <div className="table-actions">
                         {canEditAccess && (
                           <button
@@ -693,14 +737,13 @@ export default function UsersPage() {
                                 : "Activate"}
                           </button>
                         )}
-                        {canClearKpi && (
+                        {canManageKpi && (
                           <button
                             className="btn btn-ghost"
                             type="button"
-                            onClick={() => handleClearKpi(item)}
-                            disabled={clearKpiMutation.isPending && clearingId === item.id}
+                            onClick={() => handleManageKpi(item)}
                           >
-                            {clearKpiMutation.isPending && clearingId === item.id ? "Clearing..." : "Clear KPI"}
+                            Manage KPI
                           </button>
                         )}
                         {canManagerDeactivate && (
@@ -756,6 +799,72 @@ export default function UsersPage() {
           </div>
         )}
       </div>
+
+      {managingKpiUser && (
+        <div className="panel">
+          <div className="panel-header">
+            <h3>KPI Entries: {managingKpiUser.name}</h3>
+            <div className="table-actions">
+              <span className="panel-sub">
+                {userKpiEntries.length} {userKpiEntries.length === 1 ? "entry" : "entries"}
+              </span>
+              <button className="btn btn-ghost" type="button" onClick={() => setManagingKpiUser(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+
+          {isUserKpiEntriesLoading && <div className="panel-sub">Loading KPI entries...</div>}
+          {userKpiEntriesError && <div className="panel-sub">Unable to load KPI entries.</div>}
+
+          {!isUserKpiEntriesLoading && !userKpiEntriesError && userKpiEntries.length === 0 && (
+            <div className="empty-state">No KPI entries found for this user.</div>
+          )}
+
+          {!isUserKpiEntriesLoading && !userKpiEntriesError && userKpiEntries.length > 0 && (
+            <div className="table">
+              <div className="table-row table-header submissions-table">
+                <div>Template</div>
+                <div>Period</div>
+                <div>Submitted On</div>
+                <div>Score</div>
+                <div>Status</div>
+                <div>Action</div>
+              </div>
+              {userKpiEntries.map((entry) => (
+                <div key={entry.id} className="table-row submissions-table">
+                  <div>{entry.template.name}</div>
+                  <div>
+                    {formatDate(entry.periodStart)} - {formatDate(entry.periodEnd)}
+                  </div>
+                  <div>{formatDate(entry.submittedAt)}</div>
+                  <div>{entry.score?.toFixed(2) ?? "--"}</div>
+                  <div>
+                    <span className={`status-pill status-${entry.status.toLowerCase()}`}>
+                      {entry.status.replace("_", " ")}
+                    </span>
+                  </div>
+                  <div>
+                    <div className="table-actions">
+                      <Link className="btn btn-ghost" to={`/submissions/${entry.id}`}>
+                        View
+                      </Link>
+                      <button
+                        className="btn btn-ghost"
+                        type="button"
+                        onClick={() => handleDeleteKpiEntry(entry)}
+                        disabled={deleteKpiEntryMutation.isPending && deletingKpiEntryId === entry.id}
+                      >
+                        {deleteKpiEntryMutation.isPending && deletingKpiEntryId === entry.id ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

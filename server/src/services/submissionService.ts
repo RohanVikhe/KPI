@@ -42,6 +42,10 @@ type SubmissionWithGoalScores = {
   rawDeliveryData?: RawDeliveryDataInput | null;
 };
 
+function toIsoDateOnly(value: Date) {
+  return value.toISOString().slice(0, 10);
+}
+
 function normalizeRawDeliveryData(input?: RawDeliveryDataInput | null): RawDeliveryDataInput | null {
   if (!input || !Array.isArray(input.headers) || !Array.isArray(input.rows)) {
     return null;
@@ -212,6 +216,28 @@ function attachGoalScores<
 export async function createSubmission(userId: string, input: SubmissionInput) {
   if (input.periodStart > input.periodEnd) {
     throw new AppError("Period start must be before period end", 400, "PERIOD_INVALID");
+  }
+
+  const overlappingSubmission = await prisma.kpiSubmission.findFirst({
+    where: {
+      userId,
+      status: { not: "REJECTED" },
+      periodStart: { lte: input.periodEnd },
+      periodEnd: { gte: input.periodStart },
+    },
+    select: {
+      periodStart: true,
+      periodEnd: true,
+    },
+    orderBy: { periodStart: "desc" },
+  });
+
+  if (overlappingSubmission) {
+    throw new AppError(
+      `KPI period overlaps with an existing entry (${toIsoDateOnly(overlappingSubmission.periodStart)} to ${toIsoDateOnly(overlappingSubmission.periodEnd)}). Please choose a non-overlapping period.`,
+      409,
+      "PERIOD_OVERLAP"
+    );
   }
 
   const template = await prisma.kpiTemplate.findFirst({

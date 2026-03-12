@@ -111,6 +111,7 @@ export type ProjectTicketCounts = {
 
 export type Submission = {
   id: string;
+  userId: string;
   periodStart: string;
   periodEnd: string;
   status: SubmissionStatus;

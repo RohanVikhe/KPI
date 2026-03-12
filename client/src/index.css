@@ -1315,6 +1315,95 @@ a {
   min-width: 0;
 }
 
+.analytics-date-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.analytics-insight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.analytics-insight-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.analytics-insight-card .panel-header {
+  margin-bottom: 2px;
+}
+
+.analytics-insight-list {
+  display: grid;
+  gap: 8px;
+}
+
+.analytics-insight-item {
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 9px 10px;
+}
+
+.analytics-insight-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.analytics-insight-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: rgba(247, 244, 239, 0.68);
+}
+
+.analytics-goal-detail-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.analytics-goal-detail-card .panel-header {
+  margin-bottom: 2px;
+}
+
+.analytics-goal-detail-table {
+  display: grid;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.analytics-goal-detail-row {
+  display: grid;
+  grid-template-columns: 1.6fr 0.8fr 0.8fr 1fr 0.7fr;
+  gap: 10px;
+  padding: 9px 10px;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+}
+
+.analytics-goal-detail-row:last-child {
+  border-bottom: none;
+}
+
+.analytics-goal-detail-row-header {
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(247, 244, 239, 0.64);
+}
+
 .table-header {
   font-size: 12px;
   text-transform: uppercase;
@@ -1564,6 +1653,10 @@ a {
   .analytics-member-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .analytics-goal-detail-row {
+    grid-template-columns: 1.2fr 0.8fr 0.8fr 0.9fr 0.6fr;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1579,5 +1672,15 @@ a {
   .analytics-goal-card .progress-row {
     grid-template-columns: minmax(90px, 1.2fr) minmax(120px, 2.2fr) 54px;
     gap: 8px;
+  }
+
+  .analytics-goal-detail-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+    align-items: start;
+  }
+
+  .analytics-goal-detail-row-header {
+    display: none;
   }
 }
