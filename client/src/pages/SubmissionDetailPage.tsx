@@ -397,8 +397,9 @@ export default function SubmissionDetailPage() {
                         {(() => {
                           const value = row[columnIndex] || "-";
                           const explicitLink = String(rawPageLinks[rowIndex]?.[columnIndex] ?? "").trim();
+                          const explicitHref = explicitLink ? resolveRawDataLink(explicitLink) : null;
                           const valueLink = resolveRawDataLink(value);
-                          const href = explicitLink || valueLink;
+                          const href = explicitHref || valueLink;
                           if (!href) return value;
                           const linkLabel =
                             value === "-" || (explicitLink.length > 0 && Boolean(valueLink))

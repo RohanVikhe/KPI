@@ -8,9 +8,19 @@ import MessageToast from "../components/MessageToast.tsx";
 
 const SUMMARY_SHEET_NAMES = ["summary", "submission"];
 const INVALID_SHEET_CHARS = /[\/?*\[\]:]/g;
-const RAW_DELIVERY_SHEET_NAMES = ["raw delivery log", "raw data", "delivery raw data"];
+const RAW_DELIVERY_SHEET_NAMES = ["raw delivery log", "raw data", "delivery raw data", "data"];
 const RAW_DELIVERY_DEFAULT_SHEET_NAME = "Raw Delivery Log";
 const RAW_DELIVERY_MAX_ROWS = 200;
+const RAW_DELIVERY_TYPE_COLUMN_LETTER = "L";
+const RAW_DELIVERY_TYPE_OPTIONS = [
+  "Value Add",
+  "Bug",
+  "Story",
+  "Training",
+  "Knowledge Sharing",
+  "Development",
+  "Testing",
+];
 const RAW_AUTO_METRIC_KEYS = new Set<string>([
   "de_projects_on_time_budget",
   "de_total_projects_delivered",
@@ -116,6 +126,77 @@ const buildExcelFormula = (formula: string, keyToCell: Record<string, string>) =
 
 const quoteSheetName = (name: string) => `'${name.replace(/'/g, "''")}'`;
 
+const toArrayBuffer = (value: ArrayBuffer | Uint8Array) => {
+  if (value instanceof ArrayBuffer) {
+    return value;
+  }
+  const copy = new Uint8Array(value.byteLength);
+  copy.set(value);
+  return copy.buffer;
+};
+
+const applyRawTypeDropdownValidation = async (
+  baseWorkbookBuffer: ArrayBuffer,
+  rawSheetName: string,
+  startRow: number,
+  endRow: number
+) => {
+  try {
+    const exceljsNamespace = (await import("exceljs")) as {
+      Workbook?: new () => any;
+      default?: { Workbook?: new () => any };
+    };
+    const WorkbookCtor = exceljsNamespace.Workbook ?? exceljsNamespace.default?.Workbook;
+    if (!WorkbookCtor) {
+      return baseWorkbookBuffer;
+    }
+
+    const workbook = new WorkbookCtor();
+    await workbook.xlsx.load(baseWorkbookBuffer);
+
+    if (typeof workbook.eachSheet === "function") {
+      workbook.eachSheet((sheet: { properties?: { defaultRowHeight?: number; dyDescent?: number } }) => {
+        if (!sheet.properties) {
+          sheet.properties = {};
+        }
+        sheet.properties.defaultRowHeight = 15;
+        sheet.properties.dyDescent = 0.25;
+      });
+    }
+
+    const rawSheet = workbook.getWorksheet(rawSheetName);
+    if (!rawSheet) {
+      return baseWorkbookBuffer;
+    }
+
+    const listFormula = `"${RAW_DELIVERY_TYPE_OPTIONS.join(",")}"`;
+    const validationRule = {
+      type: "list",
+      allowBlank: true,
+      formulae: [listFormula],
+      showErrorMessage: true,
+      errorTitle: "Invalid type",
+      error: "Select a value from the dropdown list.",
+    };
+    const validationRange = `${RAW_DELIVERY_TYPE_COLUMN_LETTER}${startRow}:${RAW_DELIVERY_TYPE_COLUMN_LETTER}${endRow}`;
+    const dataValidationsApi = (rawSheet as { dataValidations?: { add?: (range: string, value: unknown) => void } })
+      .dataValidations;
+
+    if (dataValidationsApi?.add) {
+      dataValidationsApi.add(validationRange, validationRule);
+    } else {
+      for (let rowNumber = startRow; rowNumber <= endRow; rowNumber += 1) {
+        rawSheet.getCell(`${RAW_DELIVERY_TYPE_COLUMN_LETTER}${rowNumber}`).dataValidation = validationRule;
+      }
+    }
+
+    const updatedWorkbookBuffer = (await workbook.xlsx.writeBuffer()) as ArrayBuffer | Uint8Array;
+    return toArrayBuffer(updatedWorkbookBuffer);
+  } catch {
+    return baseWorkbookBuffer;
+  }
+};
+
 const normalizeYesNo = (value: unknown) => {
   const normalized = normalizeLabel(value);
   if (["y", "yes", "true", "1"].includes(normalized)) return true;
@@ -174,6 +255,49 @@ const getSheetCellHyperlinkDisplay = (sheet: XLSX.WorkSheet, rowIndex: number, c
 const findColumnByFragments = (headers: string[], fragments: string[]) =>
   headers.findIndex((header) => fragments.every((fragment) => header.includes(fragment)));
 
+type RawDeliveryColumnIndexes = {
+  deliveredFlag: number;
+  deliveryDate: number;
+  reworkFlag: number;
+  reworkCount: number;
+  escalationFlag: number;
+  escalationLevel: number;
+  postDefectFlag: number;
+  postDefectCount: number;
+  dueDate: number;
+  additionalInitiatives: number;
+  type: number;
+};
+
+const getRawDeliveryColumnIndexes = (headers: string[]): RawDeliveryColumnIndexes => ({
+  deliveredFlag: findColumnByFragments(headers, ["delivered", "y/n"]),
+  deliveryDate: findColumnByFragments(headers, ["delivery", "date"]),
+  reworkFlag: findColumnByFragments(headers, ["rework", "y/n"]),
+  reworkCount: findColumnByFragments(headers, ["rework", "count"]),
+  escalationFlag: findColumnByFragments(headers, ["escalat", "y/n"]),
+  escalationLevel: findColumnByFragments(headers, ["escalation", "level"]),
+  postDefectFlag: findColumnByFragments(headers, ["defect", "y/n"]),
+  postDefectCount: findColumnByFragments(headers, ["defect", "count"]),
+  dueDate: findColumnByFragments(headers, ["due", "date"]),
+  additionalInitiatives: findColumnByFragments(headers, ["additional", "initiative"]),
+  type: findColumnByFragments(headers, ["type"]),
+});
+
+const hasRawDeliveryRequiredColumns = (columns: RawDeliveryColumnIndexes) => {
+  const hasDelivered = columns.deliveredFlag !== -1 || columns.deliveryDate !== -1;
+  const hasRework = columns.reworkFlag !== -1 || columns.reworkCount !== -1;
+  const hasEscalation = columns.escalationFlag !== -1 || columns.escalationLevel !== -1;
+  const hasPostDefect = columns.postDefectFlag !== -1 || columns.postDefectCount !== -1;
+  return hasDelivered && hasRework && hasEscalation && hasPostDefect;
+};
+
+const findRawDeliveryHeaderIndex = (rows: unknown[][]) =>
+  rows.findIndex((row) => {
+    const headers = row.map((cell) => normalizeLabel(cell));
+    const columns = getRawDeliveryColumnIndexes(headers);
+    return hasRawDeliveryRequiredColumns(columns);
+  });
+
 type ParsedRawDeliveryMetrics = {
   totalDelivered: number;
   firstTimeRightCount: number;
@@ -224,32 +348,16 @@ const parseRawNumber = (value: unknown) => {
 
 const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetrics | null => {
   const rows = readSheetRows(sheet);
-  const headerIndex = rows.findIndex((row) => {
-    const headers = row.map((cell) => normalizeLabel(cell));
-    return (
-      findColumnByFragments(headers, ["delivered", "y/n"]) !== -1 &&
-      findColumnByFragments(headers, ["rework", "y/n"]) !== -1 &&
-      findColumnByFragments(headers, ["escalat", "y/n"]) !== -1 &&
-      findColumnByFragments(headers, ["defect", "y/n"]) !== -1
-    );
-  });
+  const headerIndex = findRawDeliveryHeaderIndex(rows);
 
   if (headerIndex === -1) {
     return null;
   }
 
   const headers = rows[headerIndex].map((cell) => normalizeLabel(cell));
-  const deliveredIndex = findColumnByFragments(headers, ["delivered", "y/n"]);
-  const reworkIndex = findColumnByFragments(headers, ["rework", "y/n"]);
-  const escalatedIndex = findColumnByFragments(headers, ["escalat", "y/n"]);
-  const postDefectIndex = findColumnByFragments(headers, ["defect", "y/n"]);
-  const dueDateIndex = findColumnByFragments(headers, ["due", "date"]);
-  const deliveryDateIndex = findColumnByFragments(headers, ["delivery", "date"]);
-  const reworkCountIndex = findColumnByFragments(headers, ["rework", "count"]);
-  const additionalInitiativesIndex = findColumnByFragments(headers, ["additional", "initiative"]);
-  const typeIndex = findColumnByFragments(headers, ["type"]);
+  const columns = getRawDeliveryColumnIndexes(headers);
 
-  if (deliveredIndex === -1 || reworkIndex === -1 || escalatedIndex === -1 || postDefectIndex === -1) {
+  if (!hasRawDeliveryRequiredColumns(columns)) {
     return null;
   }
 
@@ -263,18 +371,24 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
   let hasRowData = false;
 
   for (const row of rows.slice(headerIndex + 1)) {
-    const deliveredCell = row[deliveredIndex];
-    const reworkCell = row[reworkIndex];
-    const escalatedCell = row[escalatedIndex];
-    const postDefectCell = row[postDefectIndex];
+    const deliveredCell =
+      columns.deliveredFlag !== -1 ? row[columns.deliveredFlag] : columns.deliveryDate !== -1 ? row[columns.deliveryDate] : "";
+    const reworkCell = columns.reworkFlag !== -1 ? row[columns.reworkFlag] : "";
+    const escalationCell = columns.escalationFlag !== -1 ? row[columns.escalationFlag] : "";
+    const postDefectCell = columns.postDefectFlag !== -1 ? row[columns.postDefectFlag] : "";
+    const reworkCountCell = columns.reworkCount === -1 ? "" : row[columns.reworkCount];
+    const escalationLevelCell = columns.escalationLevel === -1 ? "" : row[columns.escalationLevel];
+    const postDefectCountCell = columns.postDefectCount === -1 ? "" : row[columns.postDefectCount];
     const hasTrackingValue = [
       deliveredCell,
       reworkCell,
-      escalatedCell,
+      reworkCountCell,
+      escalationCell,
+      escalationLevelCell,
       postDefectCell,
-      reworkCountIndex === -1 ? "" : row[reworkCountIndex],
-      additionalInitiativesIndex === -1 ? "" : row[additionalInitiativesIndex],
-      typeIndex === -1 ? "" : row[typeIndex],
+      postDefectCountCell,
+      columns.additionalInitiatives === -1 ? "" : row[columns.additionalInitiatives],
+      columns.type === -1 ? "" : row[columns.type],
     ].some((cell) => normalizeCell(cell).length > 0);
 
     if (!hasTrackingValue) {
@@ -283,25 +397,37 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
 
     hasRowData = true;
 
-    const deliveredValue = normalizeLabel(deliveredCell);
-    const reworkValue = normalizeLabel(reworkCell);
-    const escalatedValue = normalizeLabel(escalatedCell);
-    const postDefectValue = normalizeLabel(postDefectCell);
-    const delivered = deliveredValue === "y";
-    const reworkIsNo = reworkValue === "n";
-    const escalated = escalatedValue === "y";
-    const postDefect = postDefectValue === "y";
-    const typeValue = typeIndex !== -1 ? normalizeLabel(row[typeIndex]) : "";
+    const deliveredFlag = columns.deliveredFlag !== -1 ? normalizeYesNo(row[columns.deliveredFlag]) : null;
+    const deliveryDate = columns.deliveryDate !== -1 ? parseRawDate(row[columns.deliveryDate]) : null;
+    const delivered = deliveredFlag === null ? Boolean(deliveryDate) : deliveredFlag;
+
+    const reworkFlag = columns.reworkFlag !== -1 ? normalizeYesNo(row[columns.reworkFlag]) : null;
+    const rowReworkCount = columns.reworkCount !== -1 ? parseRawNumber(row[columns.reworkCount]) : 0;
+    const hasRework = reworkFlag === true || rowReworkCount > 0;
+
+    const escalationFlag = columns.escalationFlag !== -1 ? normalizeYesNo(row[columns.escalationFlag]) : null;
+    const escalationLevel = columns.escalationLevel !== -1 ? normalizeLabel(row[columns.escalationLevel]) : "";
+    const escalated =
+      escalationFlag === null
+        ? escalationLevel.length > 0 && escalationLevel !== "none"
+        : escalationFlag;
+
+    const postDefectFlag = columns.postDefectFlag !== -1 ? normalizeYesNo(row[columns.postDefectFlag]) : null;
+    const rowPostDefectCount = columns.postDefectCount !== -1 ? parseRawNumber(row[columns.postDefectCount]) : 0;
+    const postDefect = postDefectFlag === true || rowPostDefectCount > 0;
+
+    const typeValue = columns.type !== -1 ? normalizeLabel(row[columns.type]) : "";
 
     if (delivered) {
       totalDelivered += 1;
-      if (reworkIsNo) {
+      if (!hasRework) {
         firstTimeRightCount += 1;
       }
-      if (dueDateIndex !== -1 && deliveryDateIndex !== -1) {
-        const dueDate = parseRawDate(row[dueDateIndex]);
-        const deliveryDate = parseRawDate(row[deliveryDateIndex]);
-        if (dueDate && deliveryDate && deliveryDate.getTime() <= dueDate.getTime()) {
+      if (columns.dueDate !== -1 && columns.deliveryDate !== -1) {
+        const dueDate = parseRawDate(row[columns.dueDate]);
+        const rowDeliveryDate = parseRawDate(row[columns.deliveryDate]);
+        const effectiveDeliveryDate = rowDeliveryDate ?? deliveryDate;
+        if (dueDate && effectiveDeliveryDate && effectiveDeliveryDate.getTime() <= dueDate.getTime()) {
           projectsOnTimeBudget += 1;
         }
       }
@@ -312,14 +438,16 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     if (postDefect) {
       postDeliveryDefectCount += 1;
     }
-    if (reworkCountIndex !== -1) {
-      reworkCount += parseRawNumber(row[reworkCountIndex]);
+    if (columns.reworkCount !== -1) {
+      reworkCount += rowReworkCount;
+    } else if (reworkFlag === true) {
+      reworkCount += 1;
     }
-    if (additionalInitiativesIndex !== -1) {
-      if (normalizeYesNo(row[additionalInitiativesIndex]) === true) {
+    if (columns.additionalInitiatives !== -1) {
+      if (normalizeYesNo(row[columns.additionalInitiatives]) === true) {
         additionalInitiatives += 1;
       }
-    } else if (typeIndex !== -1) {
+    } else if (columns.type !== -1) {
       if (typeValue === "value add") {
         additionalInitiatives += 1;
       }
@@ -344,15 +472,7 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
 
 const parseRawDeliveryDataPayload = (sheet: XLSX.WorkSheet, sheetName: string): RawDeliveryDataPayload | null => {
   const rows = readSheetRows(sheet);
-  const headerIndex = rows.findIndex((row) => {
-    const headers = row.map((cell) => normalizeLabel(cell));
-    return (
-      findColumnByFragments(headers, ["delivered", "y/n"]) !== -1 &&
-      findColumnByFragments(headers, ["rework", "y/n"]) !== -1 &&
-      findColumnByFragments(headers, ["escalat", "y/n"]) !== -1 &&
-      findColumnByFragments(headers, ["defect", "y/n"]) !== -1
-    );
-  });
+  const headerIndex = findRawDeliveryHeaderIndex(rows);
 
   if (headerIndex === -1) {
     return null;
@@ -611,23 +731,18 @@ export default function NewSubmissionPage() {
       ["Month / Period", ""],
       [
         "Sr No",
-        "Ticket/Task ID",
+        "Ticket ID",
         "Project/Module",
-        "Issue Description",
-        "Issue Date",
-        "Due Date",
-        "Start Date",
+        "Ticket Description",
+        "Ticket Created Date",
+        "Ticket Due Date",
+        "Work Start Date",
         "Delivery Date",
-        "Delivered? (Y/N)",
-        "Rework Required? (Y/N)",
         "Rework Count",
-        "Escalated? (Y/N)",
         "Escalation Level",
-        "Post-Delivery Defect? (Y/N)",
-        "Defect Count",
+        "Post-Delivery Defect Count",
         "Type",
         "Root Cause",
-        "Reference Link",
         "FTR Flag",
         "ESC Flag",
         "PDD Flag",
@@ -638,30 +753,21 @@ export default function NewSubmissionPage() {
       const rowNumber = rawDataStartRow + index;
       rawRows.push([
         index + 1,
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        {
-          t: "n",
-          f: `IF(AND(I${rowNumber}="Y",J${rowNumber}="N"),1,0)`,
-          v: 0,
-        },
-        { t: "n", f: `IF(L${rowNumber}="Y",1,0)`, v: 0 },
-        { t: "n", f: `IF(N${rowNumber}="Y",1,0)`, v: 0 },
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        { f: `IF(H${rowNumber}="","",IF(IFERROR(VALUE(I${rowNumber}),0)=0,1,0))` },
+        { f: `IF(H${rowNumber}="","",IF(AND(LOWER(TRIM(J${rowNumber}))<>"",LOWER(TRIM(J${rowNumber}))<>"none"),1,0))` },
+        { f: `IF(H${rowNumber}="","",IF(IFERROR(VALUE(K${rowNumber}),0)>0,1,0))` },
       ]);
     }
 
@@ -672,49 +778,43 @@ export default function NewSubmissionPage() {
 
     rawRows.push([]);
     rawRows.push([
-      "Total Delivered (Y)",
-      { t: "n", f: `COUNTIFS(I${rawDataStartRow}:I${rawDataEndRow},"Y")`, v: 0 },
+      "Total Delivered",
+      { f: `IF(COUNTIFS(H${rawDataStartRow}:H${rawDataEndRow},"<>")=0,"",COUNTIFS(H${rawDataStartRow}:H${rawDataEndRow},"<>"))` },
       "Count",
     ]);
     rawRows.push([
       "First Time Right Count",
-      { t: "n", f: `COUNTIFS(I${rawDataStartRow}:I${rawDataEndRow},"Y",J${rawDataStartRow}:J${rawDataEndRow},"N")`, v: 0 },
+      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(N${rawDataStartRow}:N${rawDataEndRow}))` },
       "Count",
     ]);
     rawRows.push([
       "Escalation Count",
-      { t: "n", f: `COUNTIFS(L${rawDataStartRow}:L${rawDataEndRow},"Y")`, v: 0 },
+      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(O${rawDataStartRow}:O${rawDataEndRow}))` },
       "Count",
     ]);
     rawRows.push([
       "Post-Delivery Defect Count",
-      { t: "n", f: `COUNTIFS(N${rawDataStartRow}:N${rawDataEndRow},"Y")`, v: 0 },
+      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(P${rawDataStartRow}:P${rawDataEndRow}))` },
       "Count",
     ]);
     rawRows.push([
       "First Time Right (%)",
       {
-        t: "n",
-        f: `IF(B${rawTotalDeliveredRow}=0,0,ROUND((B${rawFtrCountRow}/B${rawTotalDeliveredRow})*100,2))`,
-        v: 0,
+        f: `IF(B${rawTotalDeliveredRow}="","",ROUND((B${rawFtrCountRow}/B${rawTotalDeliveredRow})*100,2))`,
       },
       "%",
     ]);
     rawRows.push([
       "Escalation Rate (%)",
       {
-        t: "n",
-        f: `IF(B${rawTotalDeliveredRow}=0,0,ROUND((B${rawEscalationCountRow}/B${rawTotalDeliveredRow})*100,2))`,
-        v: 0,
+        f: `IF(B${rawTotalDeliveredRow}="","",ROUND((B${rawEscalationCountRow}/B${rawTotalDeliveredRow})*100,2))`,
       },
       "%",
     ]);
     rawRows.push([
       "Post-Delivery Defect Rate (%)",
       {
-        t: "n",
-        f: `IF(B${rawTotalDeliveredRow}=0,0,ROUND((B${rawPostDefectCountRow}/B${rawTotalDeliveredRow})*100,2))`,
-        v: 0,
+        f: `IF(B${rawTotalDeliveredRow}="","",ROUND((B${rawPostDefectCountRow}/B${rawTotalDeliveredRow})*100,2))`,
       },
       "%",
     ]);
@@ -722,23 +822,18 @@ export default function NewSubmissionPage() {
     const rawSheet = XLSX.utils.aoa_to_sheet(rawRows);
     rawSheet["!cols"] = [
       { wch: 8 },
-      { wch: 22 },
+      { wch: 18 },
       { wch: 28 },
       { wch: 34 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 14 },
       { wch: 16 },
-      { wch: 22 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
       { wch: 12 },
       { wch: 16 },
-      { wch: 16 },
-      { wch: 24 },
-      { wch: 12 },
+      { wch: 18 },
       { wch: 12 },
       { wch: 24 },
-      { wch: 22 },
       { wch: 10 },
       { wch: 10 },
       { wch: 10 },
@@ -747,18 +842,18 @@ export default function NewSubmissionPage() {
 
     const rawSheetRef = quoteSheetName(rawSheetName);
     const rawMetricFormulaByKey: Record<string, string> = {
-      de_projects_on_time_budget: `SUMPRODUCT(--(${rawSheetRef}!$I$${rawDataStartRow}:$I$${rawDataEndRow}="Y"),--(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow}<=${rawSheetRef}!$F$${rawDataStartRow}:$F$${rawDataEndRow}))`,
-      de_total_projects_delivered: `COUNTIFS(${rawSheetRef}!$I$${rawDataStartRow}:$I$${rawDataEndRow},"Y")`,
+      de_projects_on_time_budget: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",SUMPRODUCT(--(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow}<>""),--(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow}<=${rawSheetRef}!$F$${rawDataStartRow}:$F$${rawDataEndRow})))`,
+      de_total_projects_delivered: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>"))`,
       de_total_deliverables: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
       de_deliverables_accepted: `IFERROR(${rawSheetRef}!B${rawFtrCountRow}, "")`,
       de_escalation_count: `IFERROR(${rawSheetRef}!B${rawEscalationCountRow}, "")`,
       de_post_delivery_defects: `IFERROR(${rawSheetRef}!B${rawPostDefectCountRow}, "")`,
       de_total_deliveries: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
-      qp_rework_count: `SUM(${rawSheetRef}!$K$${rawDataStartRow}:$K$${rawDataEndRow})`,
+      qp_rework_count: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",SUM(${rawSheetRef}!$I$${rawDataStartRow}:$I$${rawDataEndRow}))`,
       qp_total_deliverables: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
       qp_compliant_deliveries: `IFERROR(${rawSheetRef}!B${rawFtrCountRow}, "")`,
       qp_total_deliveries: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
-      vc_additional_initiatives: `COUNTIFS(${rawSheetRef}!$P$${rawDataStartRow}:$P$${rawDataEndRow},"Value Add")`,
+      vc_additional_initiatives: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$L$${rawDataStartRow}:$L$${rawDataEndRow},"Value Add"))`,
     };
 
     template.goals.forEach((goal, index) => {
@@ -812,25 +907,25 @@ export default function NewSubmissionPage() {
           const addr = XLSX.utils.encode_cell({ r: rowIndex, c: valueColIndex });
           const rawMetricFormula = rawMetricFormulaByKey[metric.key];
           if (rawMetricFormula) {
-            sheet[addr] = sheet[addr] ?? { t: "n", v: 0 };
-            sheet[addr].f = rawMetricFormula;
-            sheet[addr].t = "n";
-            sheet[addr].v = 0;
+            sheet[addr] = { f: rawMetricFormula };
             return;
           }
           if (!metric.isComputed || !metric.calcFormula) return;
           const excelFormula = buildExcelFormula(metric.calcFormula, keyToCell);
           if (!excelFormula) return;
-          sheet[addr] = sheet[addr] ?? { t: "n", v: 0 };
-          sheet[addr].f = excelFormula;
-          sheet[addr].t = "n";
-          sheet[addr].v = 0;
+          sheet[addr] = { f: excelFormula };
         });
       }
       XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
     });
 
-    const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    const baseExcelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
+    const excelBuffer = await applyRawTypeDropdownValidation(
+      baseExcelBuffer,
+      rawSheetName,
+      rawDataStartRow,
+      rawDataEndRow
+    );
     const blob = new Blob([excelBuffer], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     });

@@ -13,6 +13,7 @@
     "@fontsource/space-grotesk": "^5.2.10",
     "@hookform/resolvers": "^5.2.2",
     "@tanstack/react-query": "^5.90.20",
+    "exceljs": "^4.4.0",
     "expr-eval": "^2.0.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
