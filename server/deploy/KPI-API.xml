@@ -1,0 +1,17 @@
+﻿<service>
+  <id>KPI-API</id>
+  <name>KPI-API</name>
+  <description>KPI backend API service</description>
+  <executable>C:\Program Files\nodejs\node.exe</executable>
+  <arguments>dist\index.js</arguments>
+  <workingdirectory>D:\KPI\server</workingdirectory>
+  <stoptimeout>15 sec</stoptimeout>
+  <env name="NODE_ENV" value="production" />
+  <env name="DOTENV_CONFIG_PATH" value="D:\KPI\server\.env.production" />
+  <logpath>D:\KPI\server\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+  <onfailure action="restart" delay="10 sec" />
+</service>

@@ -1,81 +1,122 @@
+#Requires -RunAsAdministrator
+
+[CmdletBinding()]
 param(
-  [string]$ServiceName = "KPI-API",
-  [string]$ServerPath = "D:\KPI\server",
-  [string]$NodeExe = "C:\Program Files\nodejs\node.exe",
-  [string]$WinSwExe = "D:\KPI\server\deploy\KPI-API.exe"
+  [string]$SiteName = "KPI",
+  [string]$AppPoolName = "KPIStaticPool",
+  [string]$PhysicalPath = "D:\KPI\client\dist",
+  [string]$IPAddress = "*",
+  [int]$Port = 8080,
+  [string]$HostHeader = "",
+  [switch]$SkipAclUpdate
 )
 
-$distEntry = Join-Path $ServerPath "dist\index.js"
-$envFile = Join-Path $ServerPath ".env.production"
-$logsDir = Join-Path $ServerPath "logs"
-$wrapperDir = Split-Path -Parent $WinSwExe
-$wrapperBaseName = [System.IO.Path]::GetFileNameWithoutExtension($WinSwExe)
-$wrapperConfigPath = Join-Path $wrapperDir "$wrapperBaseName.xml"
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-if (-not (Test-Path $WinSwExe)) {
-  throw "WinSW executable was not found at $WinSwExe. Download WinSW, rename it to $wrapperBaseName.exe, and place it in $wrapperDir."
+if (-not (Test-Path $PhysicalPath)) {
+  throw "Frontend build output was not found at $PhysicalPath. Run npm run build inside the client folder first."
 }
 
-if (-not (Test-Path $NodeExe)) {
-  throw "Node.js was not found at $NodeExe"
+Import-Module WebAdministration
+
+function Set-RootApplicationPool {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$TargetSiteName,
+
+    [Parameter(Mandatory = $true)]
+    [string]$TargetAppPoolName
+  )
+
+  Set-WebConfigurationProperty `
+    -PSPath "MACHINE/WEBROOT/APPHOST" `
+    -Filter "system.applicationHost/sites/site[@name='$TargetSiteName']/application[@path='/']" `
+    -Name "applicationPool" `
+    -Value $TargetAppPoolName
 }
 
-if (-not (Test-Path $ServerPath)) {
-  throw "Server path was not found at $ServerPath"
+function Set-RootPhysicalPath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$TargetSiteName,
+
+    [Parameter(Mandatory = $true)]
+    [string]$TargetPhysicalPath
+  )
+
+  Set-WebConfigurationProperty `
+    -PSPath "MACHINE/WEBROOT/APPHOST" `
+    -Filter "system.applicationHost/sites/site[@name='$TargetSiteName']/application[@path='/']/virtualDirectory[@path='/']" `
+    -Name "physicalPath" `
+    -Value $TargetPhysicalPath
 }
 
-if (-not (Test-Path $distEntry)) {
-  throw "Build output was not found at $distEntry. Run npm run build inside the server folder first."
+$appPoolPath = "IIS:\AppPools\$AppPoolName"
+if (-not (Test-Path $appPoolPath)) {
+  New-WebAppPool -Name $AppPoolName | Out-Null
 }
 
-if (-not (Test-Path $envFile)) {
-  throw "Production env file was not found at $envFile. Create it from server\.env.production.example first."
-}
+Set-ItemProperty -Path $appPoolPath -Name managedRuntimeVersion -Value ""
+Set-ItemProperty -Path $appPoolPath -Name managedPipelineMode -Value 0
+Set-ItemProperty -Path $appPoolPath -Name autoStart -Value $true
+Set-ItemProperty -Path $appPoolPath -Name startMode -Value "AlwaysRunning"
+Set-ItemProperty -Path $appPoolPath -Name processModel.identityType -Value "ApplicationPoolIdentity"
+Set-ItemProperty -Path $appPoolPath -Name processModel.idleTimeout -Value ([TimeSpan]::Zero)
 
-New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
-
-$escapedServiceName = [System.Security.SecurityElement]::Escape($ServiceName)
-$escapedNodeExe = [System.Security.SecurityElement]::Escape($NodeExe)
-$escapedServerPath = [System.Security.SecurityElement]::Escape($ServerPath)
-$escapedEnvFile = [System.Security.SecurityElement]::Escape($envFile)
-$escapedLogsDir = [System.Security.SecurityElement]::Escape($logsDir)
-
-$wrapperConfig = @"
-<service>
-  <id>$escapedServiceName</id>
-  <name>$escapedServiceName</name>
-  <description>KPI backend API service</description>
-  <executable>$escapedNodeExe</executable>
-  <arguments>dist\index.js</arguments>
-  <workingdirectory>$escapedServerPath</workingdirectory>
-  <stoptimeout>15 sec</stoptimeout>
-  <env name="NODE_ENV" value="production" />
-  <env name="DOTENV_CONFIG_PATH" value="$escapedEnvFile" />
-  <logpath>$escapedLogsDir</logpath>
-  <log mode="roll-by-size">
-    <sizeThreshold>10485760</sizeThreshold>
-    <keepFiles>5</keepFiles>
-  </log>
-  <onfailure action="restart" delay="10 sec" />
-</service>
-"@
-
-Set-Content -Path $wrapperConfigPath -Value $wrapperConfig -Encoding UTF8
-
-$existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($null -ne $existingService) {
-  if ($existingService.Status -ne "Stopped") {
-    & $WinSwExe stop | Out-Host
+$sitePath = "IIS:\Sites\$SiteName"
+if (-not (Test-Path $sitePath)) {
+  $newWebsiteParams = @{
+    Name = $SiteName
+    PhysicalPath = $PhysicalPath
+    ApplicationPool = $AppPoolName
+    IPAddress = $IPAddress
+    Port = $Port
   }
-  & $WinSwExe uninstall | Out-Host
+
+  if ($HostHeader) {
+    $newWebsiteParams["HostHeader"] = $HostHeader
+  }
+
+  New-Website @newWebsiteParams | Out-Null
+}
+else {
+  Set-RootApplicationPool -TargetSiteName $SiteName -TargetAppPoolName $AppPoolName
+  Set-RootPhysicalPath -TargetSiteName $SiteName -TargetPhysicalPath $PhysicalPath
 }
 
-& $WinSwExe install | Out-Host
-& $WinSwExe start | Out-Host
+if (-not $SkipAclUpdate) {
+  & icacls.exe $PhysicalPath /grant "IIS_IUSRS:(OI)(CI)(RX)" /grant "IUSR:(OI)(CI)(RX)" /T | Out-Host
+}
 
-Write-Host "Service '$ServiceName' is installed or updated with WinSW."
-Write-Host "WinSW exe: $WinSwExe"
-Write-Host "WinSW config: $wrapperConfigPath"
-Write-Host "Backend entry: $distEntry"
-Write-Host "Env file: $envFile"
-Write-Host "Logs path: $logsDir"
+$poolState = (Get-WebAppPoolState -Name $AppPoolName).Value
+if ($poolState -ne "Started") {
+  Start-WebAppPool -Name $AppPoolName
+}
+
+$siteState = (Get-Website -Name $SiteName).State
+if ($siteState -ne "Started") {
+  Start-Website -Name $SiteName
+}
+
+$bindings = (Get-Website -Name $SiteName).Bindings.Collection | ForEach-Object {
+  "{0}://{1}" -f $_.protocol, $_.bindingInformation
+}
+
+$assignedPool = (Get-WebConfigurationProperty `
+  -PSPath "MACHINE/WEBROOT/APPHOST" `
+  -Filter "system.applicationHost/sites/site[@name='$SiteName']/application[@path='/']" `
+  -Name "applicationPool").Value
+
+Write-Host "IIS frontend site is configured."
+Write-Host "Site name: $SiteName"
+Write-Host "Physical path: $PhysicalPath"
+Write-Host "Assigned app pool: $assignedPool"
+Write-Host "App pool state: $((Get-WebAppPoolState -Name $AppPoolName).Value)"
+Write-Host "Site state: $((Get-Website -Name $SiteName).State)"
+Write-Host "Bindings:"
+$bindings | ForEach-Object { Write-Host "  $_" }
+Write-Host ""
+Write-Host "Validation:"
+Write-Host "& `"$env:windir\System32\inetsrv\appcmd.exe`" list app `"$SiteName/`" /text:apppool.name"
+Write-Host "& `"$env:windir\System32\inetsrv\appcmd.exe`" list apppool `"$AppPoolName`" /text:state"

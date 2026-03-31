@@ -1,0 +1,20 @@
+2026-03-31 08:09:49,697 DEBUG - Starting WinSW in console mode
+2026-03-31 08:09:49,734 INFO  - Installing service 'KPI-API (KPI-API)'...
+2026-03-31 08:09:49,786 INFO  - Service 'KPI-API (KPI-API)' was installed successfully.
+2026-03-31 08:09:50,200 DEBUG - Starting WinSW in console mode
+2026-03-31 08:09:50,240 INFO  - Starting service 'KPI-API (KPI-API)'...
+2026-03-31 08:09:50,641 DEBUG - Starting WinSW in service mode
+2026-03-31 08:09:50,677 INFO  - Service 'KPI-API (KPI-API)' started successfully.
+2026-03-31 08:09:50,807 INFO  - Starting C:\Program Files\nodejs\node.exe dist\index.js
+2026-03-31 08:09:51,528 INFO  - Started process 20836
+2026-03-31 08:09:51,548 DEBUG - Forwarding logs of the process System.Diagnostics.Process (node) to WinSW.SizeBasedRollingLogAppender
+2026-03-31 08:57:58,335 DEBUG - Starting WinSW in service mode
+2026-03-31 11:41:12,849 INFO  - Stopping KPI-API
+2026-03-31 11:41:12,850 DEBUG - ProcessKill 20836
+2026-03-31 11:41:12,860 DEBUG - Stopping process 20836...
+2026-03-31 11:41:12,874 DEBUG - Process 20836 canceled with code -1073741510.
+2026-03-31 11:41:12,880 INFO  - Finished KPI-API
+2026-03-31 12:34:33,181 DEBUG - Starting WinSW in service mode
+2026-03-31 12:34:33,345 INFO  - Starting C:\Program Files\nodejs\node.exe dist\index.js
+2026-03-31 12:34:33,377 INFO  - Started process 16356
+2026-03-31 12:34:33,397 DEBUG - Forwarding logs of the process System.Diagnostics.Process (node) to WinSW.SizeBasedRollingLogAppender
