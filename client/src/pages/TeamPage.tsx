@@ -4,6 +4,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { apiFetch } from "../lib/api.ts";
 import { useAuth } from "../lib/auth.tsx";
 import type { Submission } from "../lib/types.ts";
+import DateRangePicker from "../components/DateRangePicker.tsx";
 
 const TEAM_SUBMISSIONS_PAGE_SIZE = 12;
 
@@ -264,24 +265,12 @@ export default function TeamPage() {
               ))}
             </select>
           </label>
-          <label className="form-field">
-            <span>From</span>
-            <input
-              type="date"
-              value={fromDate}
-              max={toDate || undefined}
-              onChange={(event) => setFromDate(event.target.value)}
-            />
-          </label>
-          <label className="form-field">
-            <span>To</span>
-            <input
-              type="date"
-              value={toDate}
-              min={fromDate || undefined}
-              onChange={(event) => setToDate(event.target.value)}
-            />
-          </label>
+          <DateRangePicker
+            fromDate={fromDate}
+            toDate={toDate}
+            onChangeFrom={setFromDate}
+            onChangeTo={setToDate}
+          />
           <label className="form-field">
             <span>Sort by</span>
             <select value={sortField} onChange={(event) => setSortField(event.target.value as SortField)}>

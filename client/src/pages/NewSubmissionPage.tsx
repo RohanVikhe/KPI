@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as XLSX from "xlsx";
 import { ApiError, apiFetch } from "../lib/api.ts";
+import { formatDateOnly, parseFlexibleDateString } from "../lib/date.ts";
 import { evaluateFormula } from "../lib/formula.ts";
 import type { Template } from "../lib/types.ts";
 import MessageToast from "../components/MessageToast.tsx";
@@ -10,7 +11,7 @@ const SUMMARY_SHEET_NAMES = ["summary", "submission"];
 const INVALID_SHEET_CHARS = /[\/?*\[\]:]/g;
 const RAW_DELIVERY_SHEET_NAMES = ["raw delivery log", "raw data", "delivery raw data", "data"];
 const RAW_DELIVERY_DEFAULT_SHEET_NAME = "Raw Delivery Log";
-const RAW_DELIVERY_MAX_ROWS = 200;
+const RAW_DELIVERY_MAX_ROWS = 1000;
 const RAW_DELIVERY_TYPE_COLUMN_LETTER = "L";
 const RAW_DELIVERY_TYPE_OPTIONS = [
   "Value Add",
@@ -31,8 +32,6 @@ const RAW_AUTO_METRIC_KEYS = new Set<string>([
   "de_total_deliveries",
   "qp_rework_count",
   "qp_total_deliverables",
-  "qp_compliant_deliveries",
-  "qp_total_deliveries",
   "vc_additional_initiatives",
 ]);
 
@@ -169,6 +168,27 @@ const applyRawTypeDropdownValidation = async (
       return baseWorkbookBuffer;
     }
 
+    let typeColumnLetter = RAW_DELIVERY_TYPE_COLUMN_LETTER;
+    const headerRowNumber = Math.max(1, startRow - 1);
+    const headerRow = rawSheet.getRow(headerRowNumber);
+    if (headerRow && typeof headerRow.eachCell === "function") {
+      headerRow.eachCell((cell: { value?: unknown }, colNumber: number) => {
+        const text = String(cell?.value ?? "").trim().toLowerCase();
+        if (text === "type") {
+          let letter = "";
+          let columnIndex = colNumber;
+          while (columnIndex > 0) {
+            const remainder = (columnIndex - 1) % 26;
+            letter = String.fromCharCode(65 + remainder) + letter;
+            columnIndex = Math.floor((columnIndex - 1) / 26);
+          }
+          if (letter) {
+            typeColumnLetter = letter;
+          }
+        }
+      });
+    }
+
     const listFormula = `"${RAW_DELIVERY_TYPE_OPTIONS.join(",")}"`;
     const validationRule = {
       type: "list",
@@ -178,7 +198,7 @@ const applyRawTypeDropdownValidation = async (
       errorTitle: "Invalid type",
       error: "Select a value from the dropdown list.",
     };
-    const validationRange = `${RAW_DELIVERY_TYPE_COLUMN_LETTER}${startRow}:${RAW_DELIVERY_TYPE_COLUMN_LETTER}${endRow}`;
+    const validationRange = `${typeColumnLetter}${startRow}:${typeColumnLetter}${endRow}`;
     const dataValidationsApi = (rawSheet as { dataValidations?: { add?: (range: string, value: unknown) => void } })
       .dataValidations;
 
@@ -186,7 +206,7 @@ const applyRawTypeDropdownValidation = async (
       dataValidationsApi.add(validationRange, validationRule);
     } else {
       for (let rowNumber = startRow; rowNumber <= endRow; rowNumber += 1) {
-        rawSheet.getCell(`${RAW_DELIVERY_TYPE_COLUMN_LETTER}${rowNumber}`).dataValidation = validationRule;
+        rawSheet.getCell(`${typeColumnLetter}${rowNumber}`).dataValidation = validationRule;
       }
     }
 
@@ -202,6 +222,47 @@ const normalizeYesNo = (value: unknown) => {
   if (["y", "yes", "true", "1"].includes(normalized)) return true;
   if (["n", "no", "false", "0"].includes(normalized)) return false;
   return null;
+};
+
+const parseSpreadsheetDateValue = (value: unknown) => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return { kind: "valid" as const, date: value };
+  }
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      return { kind: "valid" as const, date: new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d)) };
+    }
+  }
+  return parseFlexibleDateString(normalizeCell(value));
+};
+
+const buildDateFieldError = (
+  fieldLabel: string,
+  value: string,
+  parseResult: ReturnType<typeof parseFlexibleDateString>
+) => {
+  if (parseResult.kind !== "invalid") {
+    return `${fieldLabel} is invalid`;
+  }
+  if (parseResult.code === "ambiguous") {
+    return `${fieldLabel} "${value}" is ambiguous. Use YYYY-MM-DD when both day and month are 12 or less`;
+  }
+  return `${fieldLabel} "${value}" is invalid. Use YYYY-MM-DD, DD/MM/YY, or MM/DD/YY`;
+};
+
+const buildRawSheetDateError = (
+  columnLabel: string,
+  rowNumber: number,
+  parseResult: ReturnType<typeof parseFlexibleDateString>
+) => {
+  if (parseResult.kind !== "invalid") {
+    return `Invalid ${columnLabel} value in raw delivery row ${rowNumber}`;
+  }
+  if (parseResult.code === "ambiguous") {
+    return `${columnLabel} in raw delivery row ${rowNumber} is ambiguous. Use YYYY-MM-DD when both day and month are 12 or less`;
+  }
+  return `${columnLabel} in raw delivery row ${rowNumber} is invalid. Use YYYY-MM-DD, DD/MM/YY, or MM/DD/YY`;
 };
 
 const parseHyperlinkTargetFromFormula = (formula: string) => {
@@ -305,7 +366,6 @@ type ParsedRawDeliveryMetrics = {
   postDeliveryDefectCount: number;
   projectsOnTimeBudget: number;
   reworkCount: number;
-  compliantDeliveries: number;
   additionalInitiatives: number;
 };
 
@@ -317,21 +377,11 @@ type RawDeliveryDataPayload = {
 };
 
 const parseRawDate = (value: unknown) => {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value;
-  }
-  if (typeof value === "number") {
-    const parsed = XLSX.SSF.parse_date_code(value);
-    if (parsed) {
-      return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
-    }
-  }
-  const normalized = normalizeCell(value);
-  if (!normalized) {
+  const parsed = parseSpreadsheetDateValue(value);
+  if (parsed.kind === "empty") {
     return null;
   }
-  const parsedDate = new Date(normalized);
-  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
+  return parsed.kind === "valid" ? parsed.date : null;
 };
 
 const parseRawNumber = (value: unknown) => {
@@ -465,7 +515,6 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     postDeliveryDefectCount,
     projectsOnTimeBudget,
     reworkCount,
-    compliantDeliveries: firstTimeRightCount,
     additionalInitiatives,
   };
 };
@@ -502,13 +551,15 @@ const parseRawDeliveryDataPayload = (sheet: XLSX.WorkSheet, sheetName: string): 
     const values = headers.map((header, index) => {
       const value = row[index];
       if (value instanceof Date && !Number.isNaN(value.getTime())) {
-        return value.toISOString().slice(0, 10);
+        return formatDateOnly(value);
       }
-      if (typeof value === "number" && normalizeLabel(header).includes("date")) {
-        const parsed = XLSX.SSF.parse_date_code(value);
-        if (parsed) {
-          const date = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
-          return date.toISOString().slice(0, 10);
+      if (normalizeLabel(header).includes("date")) {
+        const parsed = parseSpreadsheetDateValue(value);
+        if (parsed.kind === "valid") {
+          return formatDateOnly(parsed.date);
+        }
+        if (parsed.kind === "invalid") {
+          throw new Error(buildRawSheetDateError(header || `Date column ${index + 1}`, sheetRowIndex + 1, parsed));
         }
       }
       const normalizedValue = normalizeCell(value);
@@ -599,8 +650,6 @@ const deriveRawMetricValues = (workbook: XLSX.WorkBook, template: Template): Imp
       toEntry("de_total_deliveries", parsed.totalDelivered),
       toEntry("qp_rework_count", parsed.reworkCount),
       toEntry("qp_total_deliverables", parsed.totalDelivered),
-      toEntry("qp_compliant_deliveries", parsed.compliantDeliveries),
-      toEntry("qp_total_deliveries", parsed.totalDelivered),
       toEntry("vc_additional_initiatives", parsed.additionalInitiatives),
     ].filter(Boolean) as ImportedMetricValue[];
   }
@@ -708,6 +757,11 @@ export default function NewSubmissionPage() {
     if (!template) return;
 
     const workbook = XLSX.utils.book_new();
+    const downloadGoals = template.goals.filter(
+      (goal) =>
+        goal.key !== "billability_utilization" &&
+        normalizeLabel(goal.name) !== "billability & utilization"
+    );
 
     const summaryRows = [
       ["Template", template.name],
@@ -716,7 +770,7 @@ export default function NewSubmissionPage() {
       [],
       ["Goal Comments"],
       ["Goal Key", "Goal Name", "Comment"],
-      ...template.goals.map((goal) => [goal.key, goal.name, ""]),
+      ...downloadGoals.map((goal) => [goal.key, goal.name, ""]),
     ];
 
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
@@ -851,12 +905,10 @@ export default function NewSubmissionPage() {
       de_total_deliveries: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
       qp_rework_count: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",SUM(${rawSheetRef}!$I$${rawDataStartRow}:$I$${rawDataEndRow}))`,
       qp_total_deliverables: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
-      qp_compliant_deliveries: `IFERROR(${rawSheetRef}!B${rawFtrCountRow}, "")`,
-      qp_total_deliveries: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
       vc_additional_initiatives: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$L$${rawDataStartRow}:$L$${rawDataEndRow},"Value Add"))`,
     };
 
-    template.goals.forEach((goal, index) => {
+    downloadGoals.forEach((goal, index) => {
       const sheetName = buildSheetName(goal.name, `Goal ${index + 1}`, usedNames);
       const rows = [
         ["Goal Key", goal.key],
@@ -1195,6 +1247,18 @@ export default function NewSubmissionPage() {
         continue;
       }
 
+      const parsedPeriodStart = parseFlexibleDateString(periodStartValue);
+      if (parsedPeriodStart.kind !== "valid") {
+        errors.push(`Row ${rowIndex + 2}: ${buildDateFieldError("periodStart", periodStartValue, parsedPeriodStart)}.`);
+        continue;
+      }
+
+      const parsedPeriodEnd = parseFlexibleDateString(periodEndValue);
+      if (parsedPeriodEnd.kind !== "valid") {
+        errors.push(`Row ${rowIndex + 2}: ${buildDateFieldError("periodEnd", periodEndValue, parsedPeriodEnd)}.`);
+        continue;
+      }
+
       const submittedValues: { metricId: string; valueNumber: number }[] = [];
       let rowError = "";
 
@@ -1246,8 +1310,8 @@ export default function NewSubmissionPage() {
           method: "POST",
           body: JSON.stringify({
             templateId: template.id,
-            periodStart: new Date(periodStartValue).toISOString(),
-            periodEnd: new Date(periodEndValue).toISOString(),
+            periodStart: parsedPeriodStart.date.toISOString(),
+            periodEnd: parsedPeriodEnd.date.toISOString(),
             values: submittedValues,
             goalNotes: goalNotePayload,
           }),
@@ -1277,12 +1341,19 @@ export default function NewSubmissionPage() {
 
     try {
       const parsed = parseMultiSheetWorkbook(workbook);
-      const periodStartDate = new Date(parsed.periodStart);
-      const periodEndDate = new Date(parsed.periodEnd);
+      const parsedPeriodStart = parseFlexibleDateString(parsed.periodStart);
+      const parsedPeriodEnd = parseFlexibleDateString(parsed.periodEnd);
 
-      if (Number.isNaN(periodStartDate.valueOf()) || Number.isNaN(periodEndDate.valueOf())) {
-        throw new Error("Invalid period start or end date.");
+      if (parsedPeriodStart.kind !== "valid") {
+        throw new Error(buildDateFieldError("Period start", parsed.periodStart, parsedPeriodStart));
       }
+
+      if (parsedPeriodEnd.kind !== "valid") {
+        throw new Error(buildDateFieldError("Period end", parsed.periodEnd, parsedPeriodEnd));
+      }
+
+      const periodStartDate = parsedPeriodStart.date;
+      const periodEndDate = parsedPeriodEnd.date;
 
       if (periodStartDate > periodEndDate) {
         throw new Error("Period start must be before period end.");

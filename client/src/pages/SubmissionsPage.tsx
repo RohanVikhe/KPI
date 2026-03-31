@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { apiFetch } from "../lib/api.ts";
 import type { Submission } from "../lib/types.ts";
+import DateRangePicker from "../components/DateRangePicker.tsx";
 
 const SUBMISSIONS_PAGE_SIZE = 12;
 
@@ -132,24 +133,12 @@ export default function SubmissionsPage() {
               ))}
             </select>
           </label>
-          <label className="form-field">
-            <span>From</span>
-            <input
-              type="date"
-              value={fromDate}
-              max={toDate || undefined}
-              onChange={(event) => setFromDate(event.target.value)}
-            />
-          </label>
-          <label className="form-field">
-            <span>To</span>
-            <input
-              type="date"
-              value={toDate}
-              min={fromDate || undefined}
-              onChange={(event) => setToDate(event.target.value)}
-            />
-          </label>
+          <DateRangePicker
+            fromDate={fromDate}
+            toDate={toDate}
+            onChangeFrom={setFromDate}
+            onChangeTo={setToDate}
+          />
         </div>
 
         <div className="table-actions">

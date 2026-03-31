@@ -1,22 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Cell,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { apiFetch } from "../lib/api.ts";
+import { parseFlexibleDateString } from "../lib/date.ts";
+import { evaluateFormula } from "../lib/formula.ts";
 import { useAuth } from "../lib/auth.tsx";
 import type { Project, Submission, User } from "../lib/types.ts";
 import MessageToast from "../components/MessageToast.tsx";
+import DateRangePicker from "../components/DateRangePicker.tsx";
 
-const COLORS = ["#f29d38", "#44d9e6", "#7c8cff", "#f468a5", "#6bf0a1"];
 const ORG_ROWS_PER_PAGE = 12;
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
@@ -38,21 +30,61 @@ type DashboardUserProjects = Pick<User, "id" | "name" | "email" | "role" | "isAc
   projects?: Project[];
 };
 
-type MonthlyGoalScore = {
-  goalId: string;
-  key: string;
-  name: string;
-  score: number;
+type MetricSeriesPoint = {
+  monthKey: string;
+  value: number;
 };
 
-type MonthlySubmission = {
-  monthKey: string;
-  periodStart: string;
-  periodEnd: string;
-  score: number;
-  goalScores: MonthlyGoalScore[];
-  sourceSubmissions: number;
-  latestTemplateName: string;
+type MetricSeries = {
+  key: string;
+  label: string;
+  type: "NUMBER" | "PERCENT" | "CURRENCY";
+  goalKey: string;
+  goalName: string;
+  order: number;
+  metricOrder: number;
+  targetText?: string | null;
+  points: MetricSeriesPoint[];
+};
+
+type MetricSnapshotRow = MetricSeries & {
+  rangeValue: number | null;
+};
+
+type TargetRange = {
+  min?: number;
+  max?: number;
+  minInclusive?: boolean;
+  maxInclusive?: boolean;
+  enforceMin?: boolean;
+  enforceMax?: boolean;
+};
+
+type MetricTargetStatus = "in" | "out" | "unknown";
+
+type IssueTicket = {
+  id: string;
+  link?: string | null;
+};
+
+type RawIssueType = "escalation" | "postDefect" | "rework" | "late" | "notFtr";
+
+type RawIssueColumns = {
+  ticketId: number;
+  deliveryDate: number;
+  dueDate: number;
+  reworkFlag: number;
+  reworkCount: number;
+  escalationFlag: number;
+  escalationLevel: number;
+  postDefectFlag: number;
+  postDefectCount: number;
+  ftrFlag: number;
+};
+
+type MetricAggregate = {
+  weightedTotal: number;
+  totalDays: number;
 };
 
 const emptyProjectCounts: ProjectCountFormState = {
@@ -61,11 +93,6 @@ const emptyProjectCounts: ProjectCountFormState = {
   overdueTickets: "0",
   changeRequestTickets: "0",
 };
-
-function formatDate(value: string) {
-  const date = new Date(value);
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
 
 function formatMonthLabel(monthKey: string) {
   const [yearText, monthText] = monthKey.split("-");
@@ -76,6 +103,221 @@ function formatMonthLabel(monthKey: string) {
   }
   const date = new Date(Date.UTC(year, month - 1, 1));
   return date.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+}
+
+function formatMetricValue(value: number | null | undefined, type: "NUMBER" | "PERCENT" | "CURRENCY") {
+  if (value === null || value === undefined || Number.isNaN(value)) return "--";
+  if (type === "PERCENT") {
+    return `${value.toFixed(2)}%`;
+  }
+  if (type === "CURRENCY") {
+    return value.toFixed(2);
+  }
+  return Number.isInteger(value) ? value.toString() : value.toFixed(2);
+}
+
+function getMetricProgressPercent(value: number | null | undefined, type: "NUMBER" | "PERCENT" | "CURRENCY") {
+  if (type !== "PERCENT" || value === null || value === undefined || Number.isNaN(value)) return null;
+  return Math.min(100, Math.max(0, value));
+}
+
+function shouldUsePerPeriodTarget(targetText?: string | null) {
+  if (!targetText) return false;
+  const normalized = targetText.toLowerCase();
+  return normalized.includes("per measurement period") || normalized.includes("per period");
+}
+
+const PER_PERIOD_SKIP_METRIC_KEYS = new Set(["additional_initiatives_delivered"]);
+
+function adjustValueForPeriod(
+  value: number | null,
+  targetText: string | null | undefined,
+  periodCount: number,
+  metricKey?: string
+) {
+  if (value === null || value === undefined || Number.isNaN(value)) return value;
+  if (metricKey && PER_PERIOD_SKIP_METRIC_KEYS.has(metricKey)) return value;
+  if (!shouldUsePerPeriodTarget(targetText)) return value;
+  if (!Number.isFinite(periodCount) || periodCount <= 0) return value;
+  return value / periodCount;
+}
+
+function parseTargetRange(
+  targetText?: string | null,
+  metricType?: MetricSeries["type"],
+): TargetRange | null {
+  if (!targetText) return null;
+  const normalized = targetText.toLowerCase().replace(/,/g, " ").replace(/\u2013/g, "-");
+  const numbers = normalized.match(/-?\d+(\.\d+)?/g)?.map((value) => Number(value)) ?? [];
+  if (numbers.length === 0) return null;
+
+  const hasRangeText = /(\d+(\.\d+)?)\s*-\s*(\d+(\.\d+)?)/.test(normalized) || normalized.includes(" range");
+  const hasToText = /\bto\b/.test(normalized);
+  const hasExplicitMax = /(<=|≤|<|at most|no more than|max(imum)?|upper|not exceed)/.test(normalized);
+  const hasExplicitMin = /(>=|≥|>|at least|min(imum)?|not less than)/.test(normalized);
+  const maxInclusive = normalized.includes("<=") || normalized.includes("≤") || normalized.includes("at most") || normalized.includes("no more than");
+  const maxExclusive = normalized.includes("<") && !normalized.includes("<=");
+  const minInclusive = normalized.includes(">=") || normalized.includes("≥") || normalized.includes("at least") || normalized.includes("not less than");
+  const minExclusive = normalized.includes(">") && !normalized.includes(">=");
+  const isPercent = metricType === "PERCENT" || normalized.includes("%");
+  const rangeUpperBound = Math.max(...numbers);
+  const shouldEnforceMaxForRange = !isPercent || hasExplicitMax || rangeUpperBound <= 90;
+
+  if (numbers.length >= 2 && (hasRangeText || hasToText)) {
+    const min = Math.min(...numbers);
+    const max = Math.max(...numbers);
+    return {
+      min,
+      max,
+      minInclusive: true,
+      maxInclusive: true,
+      enforceMin: true,
+      enforceMax: shouldEnforceMaxForRange,
+    };
+  }
+
+  const range: TargetRange = {};
+  if (hasExplicitMin || minInclusive || minExclusive) {
+    range.min = numbers[0];
+    range.minInclusive = minInclusive;
+    range.enforceMin = true;
+  }
+  if (hasExplicitMax || maxInclusive || maxExclusive) {
+    range.max = numbers[0];
+    range.maxInclusive = maxInclusive;
+    range.enforceMax = true;
+  }
+
+  if (range.min === undefined && range.max === undefined && numbers.length >= 2) {
+    const min = Math.min(...numbers);
+    const max = Math.max(...numbers);
+    return {
+      min,
+      max,
+      minInclusive: true,
+      maxInclusive: true,
+      enforceMin: true,
+      enforceMax: shouldEnforceMaxForRange,
+    };
+  }
+
+  if (range.min === undefined && range.max === undefined) {
+    return null;
+  }
+
+  if (range.min !== undefined && range.enforceMin === undefined) {
+    range.enforceMin = true;
+  }
+  if (range.max !== undefined && range.enforceMax === undefined) {
+    range.enforceMax = true;
+  }
+
+  return range;
+}
+
+function getTargetStatus(value: number | null, range: TargetRange | null): MetricTargetStatus {
+  if (value === null || value === undefined || Number.isNaN(value)) return "unknown";
+  if (!range || (range.min === undefined && range.max === undefined)) return "unknown";
+
+  if (range.enforceMin && range.min !== undefined) {
+    if (value < range.min) return "out";
+    if (value === range.min && range.minInclusive === false) return "out";
+  }
+  if (range.enforceMax && range.max !== undefined) {
+    if (value > range.max) return "out";
+    if (value === range.max && range.maxInclusive === false) return "out";
+  }
+  return "in";
+}
+
+type SnapshotThresholdRule = {
+  direction: "min" | "max";
+  value: number;
+};
+
+const SNAPSHOT_THRESHOLD_BY_KEY: Record<string, SnapshotThresholdRule> = {
+  additional_initiatives_delivered: { direction: "min", value: 1 },
+  vc_additional_initiatives: { direction: "min", value: 1 },
+  delivery_error_rework_rate: { direction: "max", value: 5 },
+  qp_rework_count: { direction: "max", value: 5 },
+};
+
+function getThresholdStatus(metricKey: string, value: number | null | undefined): MetricTargetStatus | null {
+  if (value === null || value === undefined || Number.isNaN(value)) return null;
+  const rule = SNAPSHOT_THRESHOLD_BY_KEY[metricKey];
+  if (!rule) return null;
+  if (rule.direction === "min") {
+    return value < rule.value ? "out" : "in";
+  }
+  return value > rule.value ? "out" : "in";
+}
+
+function parseBoolish(value: string | null | undefined) {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return null;
+  if (["1", "y", "yes", "true"].includes(normalized)) return true;
+  if (["0", "n", "no", "false"].includes(normalized)) return false;
+  return null;
+}
+
+function parseNumber(value: string | null | undefined) {
+  if (!value) return 0;
+  const parsed = Number(value.replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseDateValue(value: string | null | undefined) {
+  const parsed = parseFlexibleDateString(value);
+  return parsed.kind === "valid" ? parsed.date : null;
+}
+
+function normalizeHeaderValue(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function findColumnByFragments(headers: string[], fragments: string[]) {
+  return headers.findIndex((header) => fragments.every((fragment) => header.includes(fragment)));
+}
+
+function getRawIssueColumns(headers: string[]): RawIssueColumns {
+  const normalizedHeaders = headers.map(normalizeHeaderValue);
+  const findByOptions = (options: string[][]) =>
+    options.map((fragments) => findColumnByFragments(normalizedHeaders, fragments)).find((index) => index !== -1) ?? -1;
+
+  return {
+    ticketId: findByOptions([["ticket", "id"], ["ticket", "#"]]),
+    deliveryDate: findByOptions([["delivery", "date"]]),
+    dueDate: findByOptions([["due", "date"]]),
+    reworkFlag: findByOptions([["rework", "flag"], ["rework", "y/n"]]),
+    reworkCount: findByOptions([["rework", "count"]]),
+    escalationFlag: findByOptions([["esc", "flag"], ["escalat", "flag"], ["escalat", "y/n"]]),
+    escalationLevel: findByOptions([["escalation", "level"]]),
+    postDefectFlag: findByOptions([["pdd", "flag"], ["defect", "flag"]]),
+    postDefectCount: findByOptions([["defect", "count"]]),
+    ftrFlag: findByOptions([["ftr", "flag"], ["first", "time", "right"]]),
+  };
+}
+
+function getIssueTypeForMetricKey(metricKey: string): RawIssueType | null {
+  const normalized = metricKey.toLowerCase();
+  if (normalized.includes("escalation")) return "escalation";
+  if (normalized.includes("post_delivery") || normalized.includes("post-delivery") || normalized.includes("defect")) {
+    return "postDefect";
+  }
+  if (normalized.includes("rework")) return "rework";
+  if (normalized.includes("first_time_right") || normalized.includes("deliverables_accepted") || normalized.includes("ftr")) {
+    return "notFtr";
+  }
+  if (normalized.includes("on_time_delivery") || normalized.includes("projects_on_time_budget")) {
+    return "late";
+  }
+  return null;
+}
+
+function isReworkMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("rework");
 }
 
 function toUtcDateOnly(value: string) {
@@ -109,27 +351,75 @@ function daySpanInclusive(start: Date, end: Date) {
   return Math.floor((end.getTime() - start.getTime()) / DAY_IN_MS) + 1;
 }
 
-function normalizeScore(score: number | null | undefined) {
-  if (score === null || score === undefined || Number.isNaN(score)) return 0;
-  const scaled = score >= 0 && score <= 1 ? score * 100 : score;
-  if (scaled > 1 && scaled <= 5) {
-    return Math.min(100, Math.max(0, (scaled / 5) * 100));
+function buildMonthSegments(start: Date, end: Date, rangeStart: Date | null, rangeEnd: Date | null) {
+  let clippedStart = start;
+  let clippedEnd = end;
+
+  if (rangeStart && clippedEnd < rangeStart) {
+    return [];
   }
-  return Math.min(100, Math.max(0, scaled));
+  if (rangeEnd && clippedStart > rangeEnd) {
+    return [];
+  }
+  if (rangeStart && clippedStart < rangeStart) {
+    clippedStart = rangeStart;
+  }
+  if (rangeEnd && clippedEnd > rangeEnd) {
+    clippedEnd = rangeEnd;
+  }
+  if (clippedStart > clippedEnd) {
+    return [];
+  }
+
+  const segments: Array<{ monthKey: string; daysCovered: number }> = [];
+  let cursor = new Date(clippedStart.getTime());
+  while (cursor <= clippedEnd) {
+    const monthStart = utcMonthStart(cursor);
+    const monthEnd = utcMonthEnd(cursor);
+    const segmentStart = clippedStart > monthStart ? clippedStart : monthStart;
+    const segmentEnd = clippedEnd < monthEnd ? clippedEnd : monthEnd;
+    const daysCovered = daySpanInclusive(segmentStart, segmentEnd);
+    if (daysCovered > 0) {
+      segments.push({ monthKey: utcMonthKey(monthStart), daysCovered });
+    }
+    cursor = addUtcDays(monthEnd, 1);
+  }
+
+  return segments;
 }
 
-function formatChartValue(value: unknown) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value.toFixed(2);
-  }
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed.toFixed(2);
+function resolveAggregatedMetricValues(
+  metrics: Submission["template"]["goals"][number]["metrics"],
+  aggregates: Map<string, MetricAggregate>
+) {
+  const variables: Record<string, number> = {};
+  const resolved = new Map<string, number>();
+
+  metrics.forEach((metric) => {
+    if (metric.isComputed) return;
+    const aggregate = aggregates.get(metric.key);
+    if (!aggregate || aggregate.totalDays <= 0) return;
+    const rawValue = aggregate.weightedTotal / aggregate.totalDays;
+    variables[metric.key] = rawValue;
+    resolved.set(metric.key, rawValue);
+  });
+
+  metrics.forEach((metric) => {
+    if (!metric.isComputed || !metric.calcFormula) return;
+    const computedValue = evaluateFormula(metric.calcFormula, variables);
+    if (computedValue === null) return;
+    let finalValue = computedValue;
+    if (metric.min !== null && metric.min !== undefined) {
+      finalValue = Math.max(metric.min, finalValue);
     }
-    return value;
-  }
-  return String(value ?? "");
+    if (metric.max !== null && metric.max !== undefined) {
+      finalValue = Math.min(metric.max, finalValue);
+    }
+    variables[metric.key] = finalValue;
+    resolved.set(metric.key, finalValue);
+  });
+
+  return resolved;
 }
 
 function parseCount(value: string) {
@@ -151,7 +441,9 @@ export default function DashboardPage() {
   const { user } = useAuth();
   const projectSectionRef = useRef<HTMLElement | null>(null);
 
-  const canViewTeamProjects = user?.role === "MANAGER" || user?.role === "ADMIN";
+  // Dashboard is personal-only; team data lives in Analytics.
+  const canViewTeamProjects = false;
+  const metricScopeLabel = "My";
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["submissions", "me", "dashboard", "approved"],
@@ -174,239 +466,392 @@ export default function DashboardPage() {
       ),
   });
 
-  const submissions = (data?.submissions ?? []).filter((submission) => submission.status === "APPROVED");
-  const monthlySubmissions = useMemo(() => {
-    type GoalAccumulator = {
-      goalId: string;
-      key: string;
-      name: string;
-      weightedTotal: number;
-      totalDays: number;
-    };
+  const [metricFromDate, setMetricFromDate] = useState("");
+  const [metricToDate, setMetricToDate] = useState("");
+  const [showMetricSnapshotFullscreen, setShowMetricSnapshotFullscreen] = useState(false);
+  const [expandedSnapshotKeys, setExpandedSnapshotKeys] = useState<Set<string>>(new Set());
+  const isMetricRangeInvalid = Boolean(metricFromDate && metricToDate && metricFromDate > metricToDate);
+  const activeMetricRangeLabel = useMemo(() => {
+    if (!metricFromDate && !metricToDate) {
+      return "All time";
+    }
+    return `${metricFromDate || "..."} to ${metricToDate || "..."}`;
+  }, [metricFromDate, metricToDate]);
 
-    type MonthAccumulator = {
-      monthKey: string;
-      coveredStart: Date;
-      coveredEnd: Date;
-      weightedScoreTotal: number;
-      totalDays: number;
-      goalById: Map<string, GoalAccumulator>;
-      latestPeriodEndTs: number;
-      latestTemplateName: string;
-      sourceSubmissions: number;
-    };
+  const approvedSubmissions = useMemo(
+    () => (data?.submissions ?? []).filter((submission) => submission.status === "APPROVED"),
+    [data?.submissions]
+  );
+  const filteredSubmissions = useMemo(() => {
+    if (isMetricRangeInvalid) return [];
+    const rangeStart = metricFromDate ? toUtcDateOnly(metricFromDate) : null;
+    const rangeEnd = metricToDate ? toUtcDateOnly(metricToDate) : null;
+    if (!rangeStart && !rangeEnd) return approvedSubmissions;
+    return approvedSubmissions.filter((submission) => {
+      const start = toUtcDateOnly(submission.periodStart);
+      const end = toUtcDateOnly(submission.periodEnd);
+      if (!start || !end || start > end) return false;
+      if (rangeStart && end < rangeStart) return false;
+      if (rangeEnd && start > rangeEnd) return false;
+      return true;
+    });
+  }, [approvedSubmissions, metricFromDate, metricToDate, isMetricRangeInvalid]);
 
-    const buckets = new Map<string, MonthAccumulator>();
+  const [selectedMetricKey, setSelectedMetricKey] = useState("");
+  const metricSeries = useMemo<MetricSeries[]>(() => {
+    const seriesMap = new Map<
+      string,
+      { meta: Omit<MetricSeries, "points">; points: Map<string, number> }
+    >();
+    const goalDefinitions = new Map<
+      string,
+      {
+        key: string;
+        name: string;
+        order: number;
+        metrics: Submission["template"]["goals"][number]["metrics"];
+        displayMetrics: Submission["template"]["goals"][number]["metrics"];
+      }
+    >();
+    const monthAggregates = new Map<string, Map<string, MetricAggregate>>();
 
-    submissions.forEach((submission) => {
+    const rangeStart = metricFromDate ? toUtcDateOnly(metricFromDate) : null;
+    const rangeEnd = metricToDate ? toUtcDateOnly(metricToDate) : null;
+
+    filteredSubmissions.forEach((submission) => {
       const start = toUtcDateOnly(submission.periodStart);
       const end = toUtcDateOnly(submission.periodEnd);
       if (!start || !end || start > end) {
         return;
       }
 
-      let cursor = new Date(start.getTime());
-      while (cursor <= end) {
-        const monthStart = utcMonthStart(cursor);
-        const monthEnd = utcMonthEnd(cursor);
-        const segmentStart = start > monthStart ? start : monthStart;
-        const segmentEnd = end < monthEnd ? end : monthEnd;
-        const daysCovered = daySpanInclusive(segmentStart, segmentEnd);
+      const segments = buildMonthSegments(start, end, rangeStart, rangeEnd);
+      if (segments.length === 0) return;
 
-        if (daysCovered <= 0) {
-          cursor = addUtcDays(monthEnd, 1);
-          continue;
-        }
-
-        const key = utcMonthKey(monthStart);
-        let bucket = buckets.get(key);
-        if (!bucket) {
-          bucket = {
-            monthKey: key,
-            coveredStart: segmentStart,
-            coveredEnd: segmentEnd,
-            weightedScoreTotal: 0,
-            totalDays: 0,
-            goalById: new Map<string, GoalAccumulator>(),
-            latestPeriodEndTs: Number.NEGATIVE_INFINITY,
-            latestTemplateName: "",
-            sourceSubmissions: 0,
-          };
-          buckets.set(key, bucket);
-        } else {
-          if (segmentStart < bucket.coveredStart) {
-            bucket.coveredStart = segmentStart;
-          }
-          if (segmentEnd > bucket.coveredEnd) {
-            bucket.coveredEnd = segmentEnd;
-          }
-        }
-
-        bucket.weightedScoreTotal += (submission.score ?? 0) * daysCovered;
-        bucket.totalDays += daysCovered;
-        bucket.sourceSubmissions += 1;
-
-        const submissionPeriodEndTs = new Date(submission.periodEnd).getTime();
-        if (Number.isFinite(submissionPeriodEndTs) && submissionPeriodEndTs >= bucket.latestPeriodEndTs) {
-          bucket.latestPeriodEndTs = submissionPeriodEndTs;
-          bucket.latestTemplateName = submission.template.name;
-        }
-
-        submission.goalScores?.forEach((goal) => {
-          const goalScore = goal.score ?? 0;
-          const existingGoal = bucket.goalById.get(goal.goalId);
-          if (!existingGoal) {
-            bucket.goalById.set(goal.goalId, {
-              goalId: goal.goalId,
-              key: goal.key,
-              name: goal.name,
-              weightedTotal: goalScore * daysCovered,
-              totalDays: daysCovered,
-            });
-            return;
-          }
-          existingGoal.weightedTotal += goalScore * daysCovered;
-          existingGoal.totalDays += daysCovered;
-        });
-
-        cursor = addUtcDays(monthEnd, 1);
-      }
-    });
-
-    return Array.from(buckets.values())
-      .map<MonthlySubmission>((bucket) => ({
-        monthKey: bucket.monthKey,
-        periodStart: bucket.coveredStart.toISOString(),
-        periodEnd: bucket.coveredEnd.toISOString(),
-        score: bucket.totalDays > 0 ? bucket.weightedScoreTotal / bucket.totalDays : 0,
-        goalScores: Array.from(bucket.goalById.values()).map((goal) => ({
-          goalId: goal.goalId,
-          key: goal.key,
-          name: goal.name,
-          score: goal.totalDays > 0 ? goal.weightedTotal / goal.totalDays : 0,
-        })),
-        sourceSubmissions: bucket.sourceSubmissions,
-        latestTemplateName: bucket.latestTemplateName || "Multiple templates",
-      }))
-      .sort((a, b) => b.periodEnd.localeCompare(a.periodEnd));
-  }, [submissions]);
-
-  const projects = projectsData?.projects ?? [];
-  const latest = monthlySubmissions[0];
-  const goalSource = useMemo(() => {
-    const withMultipleGoals =
-      submissions.find((item) => (item.goalScores?.length ?? 0) > 1) ??
-      submissions.find((item) => (item.template.goals?.length ?? 0) > 1);
-    return withMultipleGoals ?? submissions[0];
-  }, [submissions]);
-  const averagedGoalScores = useMemo(() => {
-    const aggregate = new Map<
-      string,
-      {
-        goalId: string;
-        key: string;
-        name: string;
-        total: number;
-        count: number;
-      }
-    >();
-    const goalOrder = new Map<string, number>();
-
-    monthlySubmissions.forEach((submission) => {
-      submission.goalScores.forEach((goal, index) => {
-        if (!goalOrder.has(goal.goalId)) {
-          goalOrder.set(goal.goalId, index);
-        }
-        const current = aggregate.get(goal.goalId);
-        const score = goal.score;
-        if (!current) {
-          aggregate.set(goal.goalId, {
-            goalId: goal.goalId,
-            key: goal.key,
+      submission.template.goals.forEach((goal, goalIndex) => {
+        const goalKey = goal.key || goal.id;
+        const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
+        const displayMetrics = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
+        if (!goalDefinitions.has(goalKey)) {
+          goalDefinitions.set(goalKey, {
+            key: goalKey,
             name: goal.name,
-            total: score,
-            count: 1,
+            order: goal.order ?? goalIndex,
+            metrics: goal.metrics,
+            displayMetrics,
           });
-          return;
         }
-        current.total += score;
-        current.count += 1;
+        displayMetrics.forEach((metric, metricIndex) => {
+          if (seriesMap.has(metric.key)) return;
+          seriesMap.set(metric.key, {
+            meta: {
+              key: metric.key,
+              label: metric.label,
+              type: metric.type,
+              goalKey,
+              goalName: goal.name,
+              order: goal.order ?? goalIndex,
+              metricOrder: metric.order ?? metricIndex,
+              targetText: metric.targetText ?? null,
+            },
+            points: new Map(),
+          });
+        });
+      });
+
+      const valueMap = new Map(submission.values.map((value) => [value.metricId, value.valueNumber]));
+      submission.template.goals.forEach((goal) => {
+        goal.metrics.forEach((metric) => {
+          if (metric.isComputed) return;
+          const rawValue = valueMap.get(metric.id);
+          if (rawValue === null || rawValue === undefined) return;
+          segments.forEach((segment) => {
+            const monthEntry = monthAggregates.get(segment.monthKey) ?? new Map();
+            const aggregate = monthEntry.get(metric.key) ?? { weightedTotal: 0, totalDays: 0 };
+            aggregate.weightedTotal += rawValue * segment.daysCovered;
+            aggregate.totalDays += segment.daysCovered;
+            monthEntry.set(metric.key, aggregate);
+            if (!monthAggregates.has(segment.monthKey)) {
+              monthAggregates.set(segment.monthKey, monthEntry);
+            }
+          });
+        });
       });
     });
 
-    return Array.from(aggregate.values())
-      .map((item) => ({
-        goalId: item.goalId,
-        key: item.key,
-        name: item.name,
-        score: item.count > 0 ? item.total / item.count : 0,
+    const monthKeys = Array.from(monthAggregates.keys()).sort((a, b) => (a > b ? 1 : -1));
+    monthKeys.forEach((monthKey) => {
+      const aggregates = monthAggregates.get(monthKey);
+      if (!aggregates) return;
+      goalDefinitions.forEach((goal) => {
+        const resolved = resolveAggregatedMetricValues(goal.metrics, aggregates);
+        goal.displayMetrics.forEach((metric) => {
+          const value = resolved.get(metric.key);
+          if (value === undefined) return;
+          const entry = seriesMap.get(metric.key);
+          if (!entry) return;
+          entry.points.set(monthKey, value);
+        });
+      });
+    });
+
+    return Array.from(seriesMap.values())
+      .map((entry) => ({
+        ...entry.meta,
+        points: Array.from(entry.points.entries())
+          .map(([monthKey, value]) => ({ monthKey, value }))
+          .sort((a, b) => (a.monthKey > b.monthKey ? 1 : -1)),
       }))
-      .sort((a, b) => (goalOrder.get(a.goalId) ?? 0) - (goalOrder.get(b.goalId) ?? 0));
-  }, [monthlySubmissions]);
+      .filter((series) => series.points.length > 0)
+      .sort((a, b) => {
+        if (a.order !== b.order) return a.order - b.order;
+        if (a.metricOrder !== b.metricOrder) return a.metricOrder - b.metricOrder;
+        return a.label.localeCompare(b.label);
+      });
+  }, [filteredSubmissions, metricFromDate, metricToDate]);
 
-  const stats = useMemo(() => {
-    if (monthlySubmissions.length === 0) {
-      return { avgScore: 0, bestScore: 0 };
-    }
-    const scores = monthlySubmissions.map((item) => item.score);
-    const avgScore = scores.reduce((acc, cur) => acc + cur, 0) / scores.length;
-    const bestScore = Math.max(...scores);
-    return { avgScore, bestScore };
-  }, [monthlySubmissions]);
+  const metricSnapshotRows = useMemo<MetricSnapshotRow[]>(() => {
+    if (isMetricRangeInvalid || metricSeries.length === 0) return [];
 
-  const trendData = useMemo(() => {
-    return monthlySubmissions
-      .slice()
-      .reverse()
-      .map((item) => ({
-        date: formatMonthLabel(item.monthKey),
-        score: item.score,
-      }));
-  }, [monthlySubmissions]);
+    const goalDefinitions = new Map<
+      string,
+      {
+        metrics: Submission["template"]["goals"][number]["metrics"];
+        displayMetrics: Submission["template"]["goals"][number]["metrics"];
+      }
+    >();
+    const rangeAggregates = new Map<string, MetricAggregate>();
 
-  const pieData = useMemo(() => {
-    if (averagedGoalScores.length > 0) {
-      return averagedGoalScores
-        .map((goal) => ({
-          name: goal.name,
-          value: goal.score ?? 0,
-        }))
-        .filter((item) => item.value > 0);
-    }
-    if (!goalSource) return [];
-    if (goalSource.goalScores && goalSource.goalScores.length > 0) {
-      return goalSource.goalScores
-        .map((goal) => ({
-          name: goal.name,
-          value: goal.score ?? 0,
-        }))
-        .filter((item) => item.value > 0);
-    }
-    const valueMap = new Map(goalSource.values.map((value) => [value.metricId, value.valueNumber]));
-    const metrics = goalSource.template.goals.flatMap((goal) => goal.metrics);
-    return metrics
-      .map((metric) => ({
-        name: metric.label,
-        value: valueMap.get(metric.id) ?? 0,
-      }))
-      .filter((item) => item.value > 0);
-  }, [averagedGoalScores, goalSource]);
+    const rangeStart = metricFromDate ? toUtcDateOnly(metricFromDate) : null;
+    const rangeEnd = metricToDate ? toUtcDateOnly(metricToDate) : null;
 
-  const goalProgress = useMemo(() => {
-    if (averagedGoalScores.length > 0) {
-      return averagedGoalScores.map((goal) => ({
-        ...goal,
-        progress: normalizeScore(goal.score),
-      }));
-    }
-    if (!goalSource?.goalScores) return [];
-    return goalSource.goalScores.map((goal) => ({
-      ...goal,
-      progress: normalizeScore(goal.score),
+    filteredSubmissions.forEach((submission) => {
+      const start = toUtcDateOnly(submission.periodStart);
+      const end = toUtcDateOnly(submission.periodEnd);
+      if (!start || !end || start > end) {
+        return;
+      }
+
+      let clippedStart = start;
+      let clippedEnd = end;
+      if (rangeStart && clippedEnd < rangeStart) return;
+      if (rangeEnd && clippedStart > rangeEnd) return;
+      if (rangeStart && clippedStart < rangeStart) clippedStart = rangeStart;
+      if (rangeEnd && clippedEnd > rangeEnd) clippedEnd = rangeEnd;
+      if (clippedStart > clippedEnd) return;
+
+      if (daySpanInclusive(clippedStart, clippedEnd) <= 0) return;
+
+      submission.template.goals.forEach((goal) => {
+        const goalKey = goal.key || goal.id;
+        const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
+        const displayMetrics = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
+        if (!goalDefinitions.has(goalKey)) {
+          goalDefinitions.set(goalKey, {
+            metrics: goal.metrics,
+            displayMetrics,
+          });
+        }
+      });
+
+      const valueMap = new Map(submission.values.map((value) => [value.metricId, value.valueNumber]));
+      submission.template.goals.forEach((goal) => {
+        goal.metrics.forEach((metric) => {
+          if (metric.isComputed) return;
+          const rawValue = valueMap.get(metric.id);
+          if (rawValue === null || rawValue === undefined) return;
+          const aggregate = rangeAggregates.get(metric.key) ?? { weightedTotal: 0, totalDays: 1 };
+          aggregate.weightedTotal += rawValue;
+          aggregate.totalDays = 1;
+          rangeAggregates.set(metric.key, aggregate);
+        });
+      });
+    });
+
+    const rangeResolvedByMetricKey = new Map<string, number>();
+    goalDefinitions.forEach((goal) => {
+      const resolved = resolveAggregatedMetricValues(goal.metrics, rangeAggregates);
+      goal.displayMetrics.forEach((metric) => {
+        const value = resolved.get(metric.key);
+        if (value === undefined) return;
+        rangeResolvedByMetricKey.set(metric.key, value);
+      });
+    });
+
+    return metricSeries.map((series) => ({
+      ...series,
+      rangeValue: rangeResolvedByMetricKey.get(series.key) ?? null,
     }));
-  }, [averagedGoalScores, goalSource]);
+  }, [
+    filteredSubmissions,
+    isMetricRangeInvalid,
+    metricFromDate,
+    metricToDate,
+    metricSeries,
+  ]);
 
-  const goalOverallScore = averagedGoalScores.length > 0 ? stats.avgScore : (goalSource?.score ?? 0);
+  const metricSnapshotPeriodCount = useMemo(() => {
+    if (isMetricRangeInvalid) return 0;
+    const rangeStart = metricFromDate ? toUtcDateOnly(metricFromDate) : null;
+    const rangeEnd = metricToDate ? toUtcDateOnly(metricToDate) : null;
+    let count = 0;
+
+    filteredSubmissions.forEach((submission) => {
+      const start = toUtcDateOnly(submission.periodStart);
+      const end = toUtcDateOnly(submission.periodEnd);
+      if (!start || !end || start > end) return;
+
+      let clippedStart = start;
+      let clippedEnd = end;
+      if (rangeStart && clippedEnd < rangeStart) return;
+      if (rangeEnd && clippedStart > rangeEnd) return;
+      if (rangeStart && clippedStart < rangeStart) clippedStart = rangeStart;
+      if (rangeEnd && clippedEnd > rangeEnd) clippedEnd = rangeEnd;
+      if (clippedStart > clippedEnd) return;
+      if (daySpanInclusive(clippedStart, clippedEnd) <= 0) return;
+      count += 1;
+    });
+
+    return count;
+  }, [filteredSubmissions, isMetricRangeInvalid, metricFromDate, metricToDate]);
+
+  const metricTargetStatusByKey = useMemo(() => {
+    const map = new Map<string, MetricTargetStatus>();
+    metricSnapshotRows.forEach((row) => {
+      const adjustedValue = adjustValueForPeriod(
+        row.rangeValue,
+        row.targetText ?? null,
+        metricSnapshotPeriodCount,
+        row.key
+      );
+      const targetRange = parseTargetRange(row.targetText ?? null, row.type);
+      map.set(row.key, getTargetStatus(adjustedValue, targetRange));
+    });
+    return map;
+  }, [metricSnapshotPeriodCount, metricSnapshotRows]);
+
+  const metricIssueTicketsByKey = useMemo(() => {
+    const map = new Map<string, IssueTicket[]>();
+    if (metricSnapshotRows.length === 0) return map;
+
+    const keysByIssueType = new Map<RawIssueType, string[]>();
+    metricSnapshotRows.forEach((row) => {
+      const status = metricTargetStatusByKey.get(row.key);
+      const includeBecauseRed = status === "out";
+      const includeBecauseRework = isReworkMetricKey(row.key);
+      if (!includeBecauseRed && !includeBecauseRework) return;
+      const issueType = getIssueTypeForMetricKey(row.key);
+      if (!issueType) return;
+      const list = keysByIssueType.get(issueType) ?? [];
+      list.push(row.key);
+      keysByIssueType.set(issueType, list);
+    });
+
+    if (keysByIssueType.size === 0) return map;
+
+    const addTicket = (metricKey: string, ticket: IssueTicket) => {
+      const current = map.get(metricKey) ?? [];
+      if (current.some((existing) => existing.id === ticket.id)) return;
+      current.push(ticket);
+      map.set(metricKey, current);
+    };
+
+    const addTicketForIssue = (issueType: RawIssueType, ticket: IssueTicket) => {
+      const keys = keysByIssueType.get(issueType);
+      if (!keys) return;
+      keys.forEach((metricKey) => addTicket(metricKey, ticket));
+    };
+
+    filteredSubmissions.forEach((submission) => {
+      const rawDeliveryData = submission.rawDeliveryData;
+      if (!rawDeliveryData || rawDeliveryData.rows.length === 0) return;
+      const columns = getRawIssueColumns(rawDeliveryData.headers);
+      if (columns.ticketId === -1) return;
+
+      rawDeliveryData.rows.forEach((row, rowIndex) => {
+        const ticketId = row[columns.ticketId]?.trim();
+        if (!ticketId) return;
+        const ticketLink = rawDeliveryData.links?.[rowIndex]?.[columns.ticketId] ?? null;
+
+        const escalationFlag =
+          columns.escalationFlag !== -1 ? parseBoolish(row[columns.escalationFlag]) : null;
+        const escalationLevel =
+          columns.escalationLevel !== -1 ? row[columns.escalationLevel]?.trim().toLowerCase() : "";
+        const escalated =
+          escalationFlag !== null ? escalationFlag : escalationLevel.length > 0 && escalationLevel !== "none";
+
+        const postDefectFlag =
+          columns.postDefectFlag !== -1 ? parseBoolish(row[columns.postDefectFlag]) : null;
+        const postDefectCount =
+          columns.postDefectCount !== -1 ? parseNumber(row[columns.postDefectCount]) : 0;
+        const postDefect = postDefectFlag !== null ? postDefectFlag : postDefectCount > 0;
+
+        const reworkFlag = columns.reworkFlag !== -1 ? parseBoolish(row[columns.reworkFlag]) : null;
+        const reworkCount = columns.reworkCount !== -1 ? parseNumber(row[columns.reworkCount]) : 0;
+        const rework = reworkFlag !== null ? reworkFlag : reworkCount > 0;
+
+        const ftrFlag = columns.ftrFlag !== -1 ? parseBoolish(row[columns.ftrFlag]) : null;
+        const notFtr = ftrFlag !== null ? !ftrFlag : rework;
+
+        const deliveryDate = columns.deliveryDate !== -1 ? parseDateValue(row[columns.deliveryDate]) : null;
+        const dueDate = columns.dueDate !== -1 ? parseDateValue(row[columns.dueDate]) : null;
+        const late = Boolean(deliveryDate && dueDate && deliveryDate.getTime() > dueDate.getTime());
+
+        const ticket = { id: ticketId, link: ticketLink };
+
+        if (escalated) addTicketForIssue("escalation", ticket);
+        if (postDefect) addTicketForIssue("postDefect", ticket);
+        if (rework) addTicketForIssue("rework", ticket);
+        if (notFtr) addTicketForIssue("notFtr", ticket);
+        if (late) addTicketForIssue("late", ticket);
+      });
+    });
+
+    return map;
+  }, [filteredSubmissions, metricSnapshotRows, metricTargetStatusByKey]);
+
+  const toggleSnapshotDetails = (metricKey: string) => {
+    setExpandedSnapshotKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(metricKey)) {
+        next.delete(metricKey);
+      } else {
+        next.add(metricKey);
+      }
+      return next;
+    });
+  };
+
+  const latestMetricMonthKey = useMemo(() => {
+    let latest: string | null = null;
+    metricSeries.forEach((series) => {
+      const point = series.points[series.points.length - 1];
+      if (!point) return;
+      if (!latest || point.monthKey > latest) {
+        latest = point.monthKey;
+      }
+    });
+    return latest;
+  }, [metricSeries]);
+
+  const selectedMetric = useMemo(() => {
+    if (metricSeries.length === 0) return null;
+    return metricSeries.find((series) => series.key === selectedMetricKey) ?? metricSeries[0];
+  }, [metricSeries, selectedMetricKey]);
+
+  const selectedMetricTrend = useMemo(() => {
+    if (!selectedMetric) return [];
+    return selectedMetric.points.map((point) => ({
+      date: formatMonthLabel(point.monthKey),
+      value: point.value,
+    }));
+  }, [selectedMetric]);
+  const selectedMetricLatestValue = useMemo(() => {
+    if (!selectedMetric || selectedMetric.points.length === 0) return null;
+    return selectedMetric.points[selectedMetric.points.length - 1].value;
+  }, [selectedMetric]);
+
+  const projects = projectsData?.projects ?? [];
 
   const activeProjects = useMemo(() => projects.filter((project) => project.isActive), [projects]);
 
@@ -698,8 +1143,154 @@ export default function DashboardPage() {
   }, [teamProjectRows, currentOrgPage]);
 
   useEffect(() => {
+    if (metricSeries.length === 0) {
+      if (selectedMetricKey) {
+        setSelectedMetricKey("");
+      }
+      return;
+    }
+    if (!metricSeries.some((series) => series.key === selectedMetricKey)) {
+      setSelectedMetricKey(metricSeries[0].key);
+    }
+  }, [metricSeries, selectedMetricKey]);
+
+  useEffect(() => {
+    setExpandedSnapshotKeys(new Set());
+  }, [metricFromDate, metricToDate, filteredSubmissions.length]);
+
+  useEffect(() => {
     setOrgPage(1);
   }, [teamProjectRows.length]);
+
+  const metricSnapshotContent = (
+    <div className="chart">
+      {isMetricRangeInvalid ? (
+        <div className="empty-state">Select a valid date range to load metrics.</div>
+      ) : metricSnapshotRows.length === 0 ? (
+        <div className="empty-state">No metrics available.</div>
+      ) : (
+        <div className="analytics-goal-detail-table">
+          <div className="analytics-goal-detail-row analytics-goal-detail-row-header metric-snapshot-row">
+            <div>Metric</div>
+            <div>Value</div>
+            <div>Target</div>
+            <div>Rate</div>
+          </div>
+          {metricSnapshotRows.map((row) => {
+            const adjustedValue = adjustValueForPeriod(
+              row.rangeValue,
+              row.targetText ?? null,
+              metricSnapshotPeriodCount,
+              row.key
+            );
+            const progress = getMetricProgressPercent(adjustedValue, row.type);
+            const rateValue = progress === null ? formatMetricValue(adjustedValue, row.type) : null;
+            const rateText = progress === null ? rateValue : `${progress.toFixed(2)}%`;
+            const displayRateText = rateText ?? "--";
+            const isRateMuted = displayRateText === "--";
+            const thresholdStatus = getThresholdStatus(row.key, adjustedValue);
+            const targetStatus = metricTargetStatusByKey.get(row.key) ?? "unknown";
+            const visualStatus = thresholdStatus ?? targetStatus;
+            const statusClass =
+              visualStatus === "in" ? "is-in-range" : visualStatus === "out" ? "is-out-range" : "";
+            const issueTickets = metricIssueTicketsByKey.get(row.key) ?? [];
+            const isReworkMetric = isReworkMetricKey(row.key);
+            const canShowIssues = targetStatus === "out" || (isReworkMetric && issueTickets.length > 0);
+            const isExpanded = expandedSnapshotKeys.has(row.key);
+
+            return (
+              <Fragment key={`metric-snapshot-${row.key}`}>
+                <div className={`analytics-goal-detail-row metric-snapshot-row ${statusClass}`}>
+                    <div className="metric-snapshot-label">
+                      <div className="metric-title-row">
+                        <span className="metric-title">{row.label}</span>
+                      </div>
+                      <div className="metric-sub">{row.goalName}</div>
+                    </div>
+                  <div className="metric-snapshot-value">
+                    <div className="metric-primary">{formatMetricValue(adjustedValue, row.type)}</div>
+                    <div className="metric-sub">{activeMetricRangeLabel}</div>
+                  </div>
+                  <div className="metric-snapshot-target">{row.targetText ?? "--"}</div>
+                  <div className="metric-snapshot-progress">
+                    <div className="metric-rate-wrap">
+                      <span className={isRateMuted ? "metric-summary-muted" : "metric-rate-value"}>
+                        {displayRateText}
+                      </span>
+                      {canShowIssues && (
+                        <button
+                          type="button"
+                          className={`metric-issue-toggle ${isExpanded ? "is-open" : ""}`}
+                          onClick={() => toggleSnapshotDetails(row.key)}
+                          title={isExpanded ? "Hide tickets" : "View tickets"}
+                          aria-label={isExpanded ? "Hide tickets" : "View tickets"}
+                        >
+                          <svg viewBox="0 0 20 20" aria-hidden="true" className="metric-issue-icon">
+                            <path
+                              d="M3.5 6.5h13v7a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7Zm2-3h9a2 2 0 0 1 2 2v1h-13v-1a2 2 0 0 1 2-2Zm2 7h5"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.4"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                          <svg
+                            viewBox="0 0 20 20"
+                            aria-hidden="true"
+                            className={`metric-issue-chevron ${isExpanded ? "is-open" : ""}`}
+                          >
+                            <path
+                              d="M6 8.5 10 12.5 14 8.5"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.6"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {canShowIssues && isExpanded && (
+                  <div className="analytics-goal-detail-row metric-snapshot-details">
+                    <div className="metric-snapshot-detail">
+                      <span className="metric-snapshot-detail-label">Tickets:</span>
+                      {issueTickets.length === 0 ? (
+                        <span className="metric-snapshot-empty">No ticket details available.</span>
+                      ) : (
+                        <div className="metric-snapshot-ticket-list">
+                          {issueTickets.map((ticket) =>
+                            ticket.link ? (
+                              <a
+                                key={`${row.key}-${ticket.id}`}
+                                href={ticket.link}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="metric-ticket-link"
+                              >
+                                {ticket.id}
+                              </a>
+                            ) : (
+                              <span key={`${row.key}-${ticket.id}`} className="metric-ticket-text">
+                                {ticket.id}
+                              </span>
+                            )
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </Fragment>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 
   if (isLoading) {
     return <div className="panel">Loading dashboard...</div>;
@@ -718,21 +1309,91 @@ export default function DashboardPage() {
           onClose={() => setToast(null)}
         />
       )}
+      {showMetricSnapshotFullscreen && (
+        <div
+          className="metric-snapshot-modal"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setShowMetricSnapshotFullscreen(false)}
+        >
+          <div
+            className="metric-snapshot-modal-card"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="panel-header">
+              <div>
+                <h3>Metric Snapshot</h3>
+                <span className="panel-sub">Snapshot across selected period</span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setShowMetricSnapshotFullscreen(false)}
+              >
+                Close
+              </button>
+            </div>
+            {metricSnapshotContent}
+          </div>
+        </div>
+      )}
+      <div className="panel analytics-date-panel">
+        <div className="panel-header">
+          <h3>Metric Date Range</h3>
+          <span className="panel-sub">Applies to metric trend and snapshot · Scope: {metricScopeLabel}</span>
+        </div>
+        <div className="form-grid team-filter-grid">
+          <DateRangePicker
+            fromDate={metricFromDate}
+            toDate={metricToDate}
+            onChangeFrom={setMetricFromDate}
+            onChangeTo={setMetricToDate}
+          />
+        </div>
+        <div className="table-actions">
+          <span className="panel-sub">Active range: {activeMetricRangeLabel}</span>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              setMetricFromDate("");
+              setMetricToDate("");
+            }}
+          >
+            Reset range
+          </button>
+        </div>
+        {isMetricRangeInvalid && (
+          <div className="form-error">Start date must be before or equal to end date.</div>
+        )}
+      </div>
       <section className="stats-grid">
         <div className="stat-card">
-          <div className="stat-label">Average KPI</div>
-          <div className="stat-value">{stats.avgScore.toFixed(2)}</div>
-          <div className="stat-sub">Across monthly periods</div>
+          <div className="stat-label">Latest Metric Period</div>
+          <div className="stat-value">
+            {latestMetricMonthKey ? formatMonthLabel(latestMetricMonthKey) : "--"}
+          </div>
+          <div className="stat-sub">
+            {latestMetricMonthKey
+              ? `Scope: ${metricScopeLabel} · ${activeMetricRangeLabel}`
+              : "No submissions yet"}
+          </div>
         </div>
         <div className="stat-card">
-          <div className="stat-label">Best KPI</div>
-          <div className="stat-value">{stats.bestScore.toFixed(2)}</div>
-          <div className="stat-sub">Personal top performance</div>
+          <div className="stat-label">Tracked Metrics</div>
+          <div className="stat-value">{metricSeries.length}</div>
+          <div className="stat-sub">Computed metrics shown · Scope: {metricScopeLabel}</div>
         </div>
         <div className="stat-card">
-          <div className="stat-label">Latest Period</div>
-          <div className="stat-value">{latest ? formatMonthLabel(latest.monthKey) : "--"}</div>
-          <div className="stat-sub">{latest ? latest.latestTemplateName : "No submissions yet"}</div>
+          <div className="stat-label">Selected Metric</div>
+          <div className="stat-value">
+            {selectedMetric
+              ? formatMetricValue(selectedMetricLatestValue, selectedMetric.type)
+              : "--"}
+          </div>
+          <div className="stat-sub">{selectedMetric ? selectedMetric.label : "Choose a metric"}</div>
         </div>
         <button type="button" className="stat-card stat-card-button" onClick={showActiveProjectsFromCard}>
           <div className="stat-label">Active Projects</div>
@@ -741,7 +1402,12 @@ export default function DashboardPage() {
         </button>
       </section>
 
-      {monthlySubmissions.length === 0 ? (
+      {isMetricRangeInvalid ? (
+        <div className="panel empty-state">
+          <h3>Select a valid date range</h3>
+          <p>Adjust the metric date range to load the dashboard charts.</p>
+        </div>
+      ) : metricSeries.length === 0 ? (
         <div className="panel empty-state">
           <h3>No KPI submissions yet</h3>
           <p>Your dashboard updates only after manager or admin approval.</p>
@@ -750,74 +1416,83 @@ export default function DashboardPage() {
         <section className="chart-grid">
           <div className="panel chart-card">
             <div className="panel-header">
-              <h3>KPI Trend</h3>
-              <span className="panel-sub">Score movement across months</span>
+              <h3>Metric Trend</h3>
+              <span className="panel-sub">
+                Trend across selected range · Scope: {metricScopeLabel}
+              </span>
+            </div>
+            <div className="form-grid">
+              <label className="form-field">
+                <span>Metric</span>
+                <select
+                  value={selectedMetric?.key ?? ""}
+                  onChange={(event) => setSelectedMetricKey(event.target.value)}
+                >
+                  {metricSeries.map((series) => (
+                    <option key={`metric-option-${series.key}`} value={series.key}>
+                      {series.goalName} — {series.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
             <div className="chart">
-              <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={trendData}>
-                  <XAxis dataKey="date" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} />
-                  <Tooltip formatter={(value) => formatChartValue(value)} />
-                  <Line type="monotone" dataKey="score" stroke="#f29d38" strokeWidth={3} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+              {isMetricRangeInvalid ? (
+                <div className="empty-state">Select a valid date range to load metrics.</div>
+              ) : selectedMetricTrend.length === 0 ? (
+                <div className="empty-state">No metric trend data available.</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={260}>
+                  <LineChart data={selectedMetricTrend}>
+                    <XAxis dataKey="date" tickLine={false} axisLine={false} />
+                    <YAxis tickLine={false} axisLine={false} />
+                    <Tooltip
+                      formatter={(value) => {
+                        const parsed = typeof value === "number" ? value : Number(value);
+                        if (!Number.isFinite(parsed)) return String(value ?? "");
+                        return formatMetricValue(parsed, selectedMetric?.type ?? "NUMBER");
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="value"
+                      stroke="#f29d38"
+                      strokeWidth={3}
+                      dot={selectedMetricTrend.length <= 1 ? { r: 4 } : false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </div>
 
           <div className="panel chart-card">
             <div className="panel-header">
-              <h3>Goal Progress</h3>
-              <span className="panel-sub">
-                {averagedGoalScores.length > 0
-                  ? `Goal-wise score average across ${monthlySubmissions.length} month${
-                      monthlySubmissions.length === 1 ? "" : "s"
-                    }`
-                  : `Goal-wise score snapshot${goalSource?.periodEnd ? ` | ${formatDate(goalSource.periodEnd)}` : ""}`}
-              </span>
-            </div>
-            <div className="chart">
-              <div className="progress-stack">
-                <div className="progress-row overall">
-                  <div className="progress-label">Overall Score</div>
-                  <div className="progress-bar">
-                    <div className="progress-fill" style={{ width: `${normalizeScore(goalOverallScore)}%` }} />
-                  </div>
-                  <div className="progress-value">{normalizeScore(goalOverallScore).toFixed(0)}%</div>
-                </div>
-                {goalProgress.map((goal, index) => (
-                  <div key={goal.goalId} className="progress-row">
-                    <div className="progress-label">{goal.name}</div>
-                    <div className="progress-bar">
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${goal.progress}%`, background: COLORS[index % COLORS.length] }}
-                      />
-                    </div>
-                    <div className="progress-value">{goal.progress.toFixed(0)}%</div>
-                  </div>
-                ))}
-                {goalProgress.length === 0 && (
-                  <ResponsiveContainer width="100%" height={260}>
-                    <PieChart>
-                      <Pie
-                        data={pieData}
-                        dataKey="value"
-                        nameKey="name"
-                        innerRadius={60}
-                        outerRadius={100}
-                        paddingAngle={3}
-                      >
-                        {pieData.map((_, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value) => formatChartValue(value)} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                )}
+              <div>
+                <h3>Metric Snapshot</h3>
+                <span className="panel-sub">Snapshot across selected period</span>
               </div>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setShowMetricSnapshotFullscreen(true)}
+                disabled={metricSnapshotRows.length === 0}
+                title="Full screen"
+                aria-label="Full screen"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true" className="icon-btn-svg">
+                  <path
+                    d="M7 3.5H3.5V7M13 3.5h3.5V7M7 16.5H3.5V13M13 16.5h3.5V13"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
             </div>
+            {metricSnapshotContent}
           </div>
         </section>
       )}

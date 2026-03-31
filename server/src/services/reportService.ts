@@ -108,6 +108,7 @@ export async function generateSubmissionReport(submissionId: string, requesterId
     goals: submission.template.goals,
     values: submission.values,
     overallFormula: submission.template.formula,
+    strict: false,
   });
   const goalScoreMap = new Map(scoreResult.goalScores.map((goal) => [goal.goalId, goal.score]));
 

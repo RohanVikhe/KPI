@@ -1,6 +1,9 @@
 import { MetricType, Role, SubmissionStatus } from "@prisma/client";
+import { Parser } from "expr-eval";
 import { prisma } from "../db/prisma.js";
 import { AppError } from "../utils/errors.js";
+import { parseFlexibleDateString } from "../utils/date.js";
+import { normalizeMetricLabel } from "../utils/labels.js";
 import { computeMetricValues, computeOverallScore } from "../utils/score.js";
 
 function normalizeScore(score: number | null) {
@@ -9,6 +12,12 @@ function normalizeScore(score: number | null) {
 
 const ANALYTICS_VISIBLE_STATUSES: SubmissionStatus[] = [SubmissionStatus.APPROVED];
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const RAW_DELIVERY_DATA_START = "[[RAW_DELIVERY_DATA_START]]";
+const RAW_DELIVERY_DATA_END = "[[RAW_DELIVERY_DATA_END]]";
+const RAW_MAX_HEADERS = 30;
+const RAW_MAX_ROWS = 120;
+const RAW_MAX_CELL_LENGTH = 500;
+const RAW_MAX_LINK_LENGTH = 1000;
 
 export type AnalyticsDateRange = {
   from?: Date;
@@ -24,6 +33,40 @@ type IntervalScoreRow = {
 type MonthlyScorePoint = {
   monthKey: string;
   score: number;
+  totalDays: number;
+};
+
+type MetricAggregate = {
+  weightedTotal: number;
+  totalDays: number;
+};
+
+type RawDeliveryDataInput = {
+  sheetName?: string;
+  headers: string[];
+  rows: string[][];
+  links?: Array<Array<string | null>>;
+};
+
+type IssueTicket = {
+  id: string;
+  link?: string | null;
+};
+
+type RawIssueType = "escalation" | "postDefect" | "rework" | "late" | "notFtr" | "additionalInitiative";
+
+type RawIssueColumns = {
+  ticketId: number;
+  deliveryDate: number;
+  dueDate: number;
+  workType: number;
+  reworkFlag: number;
+  reworkCount: number;
+  escalationFlag: number;
+  escalationLevel: number;
+  postDefectFlag: number;
+  postDefectCount: number;
+  ftrFlag: number;
 };
 
 function toUtcDateOnly(value: Date) {
@@ -76,12 +119,337 @@ function buildSubmissionDateRangeWhere(range?: AnalyticsDateRange) {
   return andFilters.length > 0 ? { AND: andFilters } : {};
 }
 
-function buildMonthlyScorePoints(rows: IntervalScoreRow[]): MonthlyScorePoint[] {
+function buildSubmittedAtDateRangeWhere(range?: AnalyticsDateRange) {
+  if (!range?.from && !range?.to) {
+    return {};
+  }
+
+  return {
+    submittedAt: {
+      ...(range?.from ? { gte: range.from } : {}),
+      ...(range?.to ? { lte: range.to } : {}),
+    },
+  };
+}
+
+function normalizeRawDeliveryData(input?: RawDeliveryDataInput | null): RawDeliveryDataInput | null {
+  if (!input || !Array.isArray(input.headers) || !Array.isArray(input.rows)) {
+    return null;
+  }
+
+  const headers = input.headers
+    .map((header) => String(header ?? "").trim())
+    .filter((header) => header.length > 0)
+    .slice(0, RAW_MAX_HEADERS);
+
+  if (headers.length === 0) {
+    return null;
+  }
+
+  const linksInput = Array.isArray(input.links) ? input.links : [];
+  const rows: string[][] = [];
+  const links: Array<Array<string | null>> = [];
+  let hasAnyLinks = false;
+
+  input.rows.slice(0, RAW_MAX_ROWS).forEach((row, rowIndex) => {
+    const sourceRow = Array.isArray(row) ? row : [];
+    const sourceLinks = Array.isArray(linksInput[rowIndex]) ? linksInput[rowIndex] : [];
+    const normalizedRow = headers.map((_header, index) =>
+      String(sourceRow[index] ?? "")
+        .trim()
+        .slice(0, RAW_MAX_CELL_LENGTH)
+    );
+    const normalizedLinks = headers.map((_header, index) => {
+      const rawLink = String(sourceLinks[index] ?? "")
+        .trim()
+        .slice(0, RAW_MAX_LINK_LENGTH);
+      if (!rawLink || rawLink.startsWith("#")) {
+        return null;
+      }
+      return rawLink;
+    });
+
+    const hasRowData = normalizedRow.some(
+      (cell, index) => (index === 0 ? false : cell.length > 0 || Boolean(normalizedLinks[index]))
+    );
+    if (!hasRowData) {
+      return;
+    }
+
+    if (normalizedLinks.some((link) => Boolean(link))) {
+      hasAnyLinks = true;
+    }
+    rows.push(normalizedRow);
+    links.push(normalizedLinks);
+  });
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const sheetName = input.sheetName ? String(input.sheetName).trim().slice(0, 80) : undefined;
+  return hasAnyLinks ? { sheetName, headers, rows, links } : { sheetName, headers, rows };
+}
+
+function extractRawDeliveryDataFromGoalNotes(goalNotes?: Array<{ note?: string | null }>) {
+  if (!goalNotes || goalNotes.length === 0) {
+    return null;
+  }
+  for (const goalNote of goalNotes) {
+    const note = goalNote.note;
+    if (!note) continue;
+    const startIndex = note.indexOf(RAW_DELIVERY_DATA_START);
+    const endIndex = note.indexOf(RAW_DELIVERY_DATA_END);
+    if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+      continue;
+    }
+    const jsonStart = startIndex + RAW_DELIVERY_DATA_START.length;
+    const rawJson = note.slice(jsonStart, endIndex).trim();
+    try {
+      return normalizeRawDeliveryData(JSON.parse(rawJson));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function parseBoolish(value: string | null | undefined) {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return null;
+  if (["1", "y", "yes", "true"].includes(normalized)) return true;
+  if (["0", "n", "no", "false"].includes(normalized)) return false;
+  return null;
+}
+
+function parseNumber(value: string | null | undefined) {
+  if (!value) return 0;
+  const parsed = Number(value.replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseDateValue(value: string | null | undefined) {
+  const parsed = parseFlexibleDateString(value);
+  return parsed.kind === "valid" ? parsed.date : null;
+}
+
+function normalizeHeaderValue(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function findColumnByFragments(headers: string[], fragments: string[]) {
+  return headers.findIndex((header) => fragments.every((fragment) => header.includes(fragment)));
+}
+
+function getRawIssueColumns(headers: string[]): RawIssueColumns {
+  const normalizedHeaders = headers.map(normalizeHeaderValue);
+  const findByOptions = (options: string[][]) =>
+    options.map((fragments) => findColumnByFragments(normalizedHeaders, fragments)).find((index) => index !== -1) ?? -1;
+
+  return {
+    ticketId: findByOptions([["ticket", "id"], ["ticket", "#"]]),
+    deliveryDate: findByOptions([["delivery", "date"]]),
+    dueDate: findByOptions([["due", "date"]]),
+    workType: findByOptions([["type"]]),
+    reworkFlag: findByOptions([["rework", "flag"], ["rework", "y/n"]]),
+    reworkCount: findByOptions([["rework", "count"]]),
+    escalationFlag: findByOptions([["esc", "flag"], ["escalat", "flag"], ["escalat", "y/n"]]),
+    escalationLevel: findByOptions([["escalation", "level"]]),
+    postDefectFlag: findByOptions([["pdd", "flag"], ["defect", "flag"]]),
+    postDefectCount: findByOptions([["defect", "count"]]),
+    ftrFlag: findByOptions([["ftr", "flag"], ["first", "time", "right"]]),
+  };
+}
+
+function getIssueTypeForMetricKey(metricKey: string): RawIssueType | null {
+  const normalized = metricKey.toLowerCase();
+  if (normalized.includes("additional_initiatives")) return "additionalInitiative";
+  if (normalized.includes("escalation")) return "escalation";
+  if (normalized.includes("post_delivery") || normalized.includes("post-delivery") || normalized.includes("defect")) {
+    return "postDefect";
+  }
+  if (normalized.includes("rework")) return "rework";
+  if (normalized.includes("first_time_right") || normalized.includes("deliverables_accepted") || normalized.includes("ftr")) {
+    return "notFtr";
+  }
+  if (normalized.includes("on_time_delivery") || normalized.includes("projects_on_time_budget")) {
+    return "late";
+  }
+  return null;
+}
+
+function collectIssueTicketsByMetricKey(
+  metricKeys: string[],
+  submissions: Array<{ rawDeliveryData: RawDeliveryDataInput | null }>
+) {
+  if (metricKeys.length === 0 || submissions.length === 0) {
+    return {} as Record<string, IssueTicket[]>;
+  }
+
+  const keysByIssueType = new Map<RawIssueType, string[]>();
+  metricKeys.forEach((metricKey) => {
+    const issueType = getIssueTypeForMetricKey(metricKey);
+    if (!issueType) return;
+    const list = keysByIssueType.get(issueType) ?? [];
+    list.push(metricKey);
+    keysByIssueType.set(issueType, list);
+  });
+
+  if (keysByIssueType.size === 0) {
+    return {} as Record<string, IssueTicket[]>;
+  }
+
+  const map = new Map<string, IssueTicket[]>();
+  const addTicket = (metricKey: string, ticket: IssueTicket) => {
+    const current = map.get(metricKey) ?? [];
+    if (current.some((existing) => existing.id === ticket.id)) return;
+    current.push(ticket);
+    map.set(metricKey, current);
+  };
+  const addTicketForIssue = (issueType: RawIssueType, ticket: IssueTicket) => {
+    const keys = keysByIssueType.get(issueType);
+    if (!keys) return;
+    keys.forEach((metricKey) => addTicket(metricKey, ticket));
+  };
+
+  submissions.forEach((submission) => {
+    const rawDeliveryData = submission.rawDeliveryData;
+    if (!rawDeliveryData || rawDeliveryData.rows.length === 0) return;
+    const columns = getRawIssueColumns(rawDeliveryData.headers);
+    if (columns.ticketId === -1) return;
+
+    rawDeliveryData.rows.forEach((row, rowIndex) => {
+      const ticketId = row[columns.ticketId]?.trim();
+      if (!ticketId) return;
+      const ticketLink = rawDeliveryData.links?.[rowIndex]?.[columns.ticketId] ?? null;
+
+      const escalationFlag =
+        columns.escalationFlag !== -1 ? parseBoolish(row[columns.escalationFlag]) : null;
+      const escalationLevel =
+        columns.escalationLevel !== -1 ? row[columns.escalationLevel]?.trim().toLowerCase() : "";
+      const escalated =
+        escalationFlag !== null ? escalationFlag : escalationLevel.length > 0 && escalationLevel !== "none";
+
+      const postDefectFlag =
+        columns.postDefectFlag !== -1 ? parseBoolish(row[columns.postDefectFlag]) : null;
+      const postDefectCount =
+        columns.postDefectCount !== -1 ? parseNumber(row[columns.postDefectCount]) : 0;
+      const postDefect = postDefectFlag !== null ? postDefectFlag : postDefectCount > 0;
+
+      const reworkFlag = columns.reworkFlag !== -1 ? parseBoolish(row[columns.reworkFlag]) : null;
+      const reworkCount = columns.reworkCount !== -1 ? parseNumber(row[columns.reworkCount]) : 0;
+      const rework = reworkFlag !== null ? reworkFlag : reworkCount > 0;
+
+      const ftrFlag = columns.ftrFlag !== -1 ? parseBoolish(row[columns.ftrFlag]) : null;
+      const notFtr = ftrFlag !== null ? !ftrFlag : rework;
+
+      const deliveryDate = columns.deliveryDate !== -1 ? parseDateValue(row[columns.deliveryDate]) : null;
+      const dueDate = columns.dueDate !== -1 ? parseDateValue(row[columns.dueDate]) : null;
+      const late = Boolean(deliveryDate && dueDate && deliveryDate.getTime() > dueDate.getTime());
+      const workType = columns.workType !== -1 ? row[columns.workType]?.trim().toLowerCase() : "";
+      const additionalInitiative = workType === "value add";
+
+      const ticket = { id: ticketId, link: ticketLink };
+
+      if (additionalInitiative) addTicketForIssue("additionalInitiative", ticket);
+      if (escalated) addTicketForIssue("escalation", ticket);
+      if (postDefect) addTicketForIssue("postDefect", ticket);
+      if (rework) addTicketForIssue("rework", ticket);
+      if (notFtr) addTicketForIssue("notFtr", ticket);
+      if (late) addTicketForIssue("late", ticket);
+    });
+  });
+
+  return Object.fromEntries(map);
+}
+
+const formulaParser = new Parser({
+  operators: {
+    logical: false,
+    comparison: true,
+    in: false,
+    assignment: false,
+  },
+});
+
+function evaluateFormulaSafe(formula: string, variables: Record<string, number>): number | null {
+  if (!formula || !formula.trim()) return null;
+  try {
+    const expr = formulaParser.parse(formula);
+    const requiredVars = expr.variables();
+    for (const name of requiredVars) {
+      if (!(name in variables)) {
+        return null;
+      }
+    }
+    const result = expr.evaluate(variables);
+    if (typeof result !== "number") {
+      return null;
+    }
+    if (!Number.isFinite(result)) {
+      return 0;
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function resolveAggregatedMetricValues(metrics: { key: string; isComputed: boolean; calcFormula?: string | null; min?: number | null; max?: number | null }[], aggregates: Map<string, MetricAggregate>) {
+  const variables: Record<string, number> = {};
+  const resolved = new Map<string, number>();
+
+  metrics.forEach((metric) => {
+    if (metric.isComputed) return;
+    const aggregate = aggregates.get(metric.key);
+    if (!aggregate || aggregate.totalDays <= 0) return;
+    const rawValue = aggregate.weightedTotal / aggregate.totalDays;
+    variables[metric.key] = rawValue;
+    resolved.set(metric.key, rawValue);
+  });
+
+  metrics.forEach((metric) => {
+    if (!metric.isComputed || !metric.calcFormula) return;
+    const computedValue = evaluateFormulaSafe(metric.calcFormula, variables);
+    if (computedValue === null) return;
+    let finalValue = computedValue;
+    if (metric.min !== null && metric.min !== undefined) {
+      finalValue = Math.max(metric.min, finalValue);
+    }
+    if (metric.max !== null && metric.max !== undefined) {
+      finalValue = Math.min(metric.max, finalValue);
+    }
+    variables[metric.key] = finalValue;
+    resolved.set(metric.key, finalValue);
+  });
+
+  return resolved;
+}
+
+function buildMonthlyScorePoints(rows: IntervalScoreRow[], range?: AnalyticsDateRange): MonthlyScorePoint[] {
   const buckets = new Map<string, { weightedTotal: number; totalDays: number }>();
+  const rangeStart = range?.from ? toUtcDateOnly(range.from) : null;
+  const rangeEnd = range?.to ? toUtcDateOnly(range.to) : null;
 
   for (const row of rows) {
-    const start = toUtcDateOnly(row.periodStart);
-    const end = toUtcDateOnly(row.periodEnd);
+    let start = toUtcDateOnly(row.periodStart);
+    let end = toUtcDateOnly(row.periodEnd);
+    if (start > end) {
+      continue;
+    }
+    if (rangeStart && end < rangeStart) {
+      continue;
+    }
+    if (rangeEnd && start > rangeEnd) {
+      continue;
+    }
+    if (rangeStart && start < rangeStart) {
+      start = rangeStart;
+    }
+    if (rangeEnd && end > rangeEnd) {
+      end = rangeEnd;
+    }
     if (start > end) {
       continue;
     }
@@ -110,6 +478,7 @@ function buildMonthlyScorePoints(rows: IntervalScoreRow[]): MonthlyScorePoint[] 
     .map(([monthKey, value]) => ({
       monthKey,
       score: value.totalDays > 0 ? value.weightedTotal / value.totalDays : 0,
+      totalDays: value.totalDays,
     }))
     .sort((a, b) => (a.monthKey > b.monthKey ? 1 : -1));
 }
@@ -120,6 +489,18 @@ type AnalyticsTargetUser = {
   email: string;
   role: Role;
   managerId?: string | null;
+};
+
+type TeamMetricTrend = {
+  metric: {
+    metricId: string;
+    label: string;
+    type: MetricType;
+    goalId: string;
+    goalName: string;
+    targetText: string | null;
+  };
+  trend: { date: string; value: number }[];
 };
 
 async function resolveAnalyticsTargetUser(
@@ -158,7 +539,7 @@ export async function getUserAnalytics(userId: string, range?: AnalyticsDateRang
     select: { periodStart: true, periodEnd: true, score: true },
   });
 
-  const points = buildMonthlyScorePoints(submissions).map((item) => ({
+  const points = buildMonthlyScorePoints(submissions, range).map((item) => ({
     date: item.monthKey,
     score: item.score,
   }));
@@ -186,26 +567,28 @@ export async function getUserAnalytics(userId: string, range?: AnalyticsDateRang
   };
 }
 
-export async function getTeamAnalytics(
-  requesterId: string,
-  requesterRole: Role,
-  range?: AnalyticsDateRange
-) {
-  let userFilter: string[] = [];
-
+async function resolveTeamUserIds(requesterId: string, requesterRole: Role) {
   if (requesterRole === Role.ADMIN) {
     const users = await prisma.user.findMany({
       where: { role: { in: [Role.EMPLOYEE, Role.MANAGER] } },
       select: { id: true },
     });
-    userFilter = users.map((user) => user.id);
-  } else {
-    const reports = await prisma.user.findMany({
-      where: { managerId: requesterId },
-      select: { id: true },
-    });
-    userFilter = reports.map((report) => report.id);
+    return users.map((user) => user.id);
   }
+
+  const reports = await prisma.user.findMany({
+    where: { managerId: requesterId },
+    select: { id: true },
+  });
+  return reports.map((report) => report.id);
+}
+
+export async function getTeamAnalytics(
+  requesterId: string,
+  requesterRole: Role,
+  range?: AnalyticsDateRange
+) {
+  const userFilter = await resolveTeamUserIds(requesterId, requesterRole);
 
   if (userFilter.length === 0) {
     return {
@@ -245,34 +628,59 @@ export async function getTeamAnalytics(
     rowsByUser.set(submission.userId, userRows);
   }
 
-  const userMonthRows: Array<{ userId: string; name: string; monthKey: string; score: number }> = [];
+  const userMonthRows: Array<{
+    userId: string;
+    name: string;
+    monthKey: string;
+    score: number;
+    totalDays: number;
+  }> = [];
   for (const [userId, info] of rowsByUser.entries()) {
-    const monthlyPoints = buildMonthlyScorePoints(info.rows);
+    const monthlyPoints = buildMonthlyScorePoints(info.rows, range);
     monthlyPoints.forEach((point) => {
       userMonthRows.push({
         userId,
         name: info.name,
         monthKey: point.monthKey,
         score: point.score,
+        totalDays: point.totalDays,
       });
     });
   }
 
-  const byUser = new Map<string, { name: string; total: number; count: number }>();
-  const byDate = new Map<string, { total: number; count: number }>();
+  const byUser = new Map<
+    string,
+    { name: string; weightedTotal: number; totalDays: number; count: number }
+  >();
+  const byDate = new Map<string, { weightedTotal: number; totalDays: number; count: number }>();
+  let teamWeightedTotal = 0;
+  let teamTotalDays = 0;
 
   for (const item of userMonthRows) {
     const userEntry = byUser.get(item.userId) ?? {
       name: item.name,
-      total: 0,
+      weightedTotal: 0,
+      totalDays: 0,
       count: 0,
     };
-    userEntry.total += item.score;
+    if (item.totalDays > 0) {
+      userEntry.weightedTotal += item.score * item.totalDays;
+      userEntry.totalDays += item.totalDays;
+      teamWeightedTotal += item.score * item.totalDays;
+      teamTotalDays += item.totalDays;
+    }
     userEntry.count += 1;
     byUser.set(item.userId, userEntry);
 
-    const dateEntry = byDate.get(item.monthKey) ?? { total: 0, count: 0 };
-    dateEntry.total += item.score;
+    const dateEntry = byDate.get(item.monthKey) ?? {
+      weightedTotal: 0,
+      totalDays: 0,
+      count: 0,
+    };
+    if (item.totalDays > 0) {
+      dateEntry.weightedTotal += item.score * item.totalDays;
+      dateEntry.totalDays += item.totalDays;
+    }
     dateEntry.count += 1;
     byDate.set(item.monthKey, dateEntry);
   }
@@ -281,7 +689,7 @@ export async function getTeamAnalytics(
     .map(([userId, info]) => ({
       userId,
       name: info.name,
-      averageScore: info.count > 0 ? info.total / info.count : 0,
+      averageScore: info.totalDays > 0 ? info.weightedTotal / info.totalDays : 0,
       submissions: info.count,
     }))
     .sort((a, b) => b.averageScore - a.averageScore);
@@ -289,12 +697,11 @@ export async function getTeamAnalytics(
   const trend = Array.from(byDate.entries())
     .map(([date, entry]) => ({
       date,
-      averageScore: entry.count > 0 ? entry.total / entry.count : 0,
+      averageScore: entry.totalDays > 0 ? entry.weightedTotal / entry.totalDays : 0,
     }))
     .sort((a, b) => (a.date > b.date ? 1 : -1));
 
-  const overallAverage =
-    ranking.length > 0 ? ranking.reduce((acc, cur) => acc + cur.averageScore, 0) / ranking.length : 0;
+  const overallAverage = teamTotalDays > 0 ? teamWeightedTotal / teamTotalDays : 0;
 
   return {
     ranking,
@@ -315,7 +722,25 @@ export async function getTeamMemberAnalytics(
   const user = await resolveAnalyticsTargetUser(requesterId, requesterRole, targetUserId);
   const analytics = await getUserAnalytics(user.id, range);
   const goalProgress = await getUserGoalProgress(user.id, range);
-  const goalMetricProgress = await getUserGoalMetricProgress(user.id, range);
+  const goalMetricProgress = await getGoalMetricProgressForUsers([user.id], range);
+  const submissions = await prisma.kpiSubmission.findMany({
+    where: {
+      userId: user.id,
+      status: { in: ANALYTICS_VISIBLE_STATUSES },
+      ...buildSubmissionDateRangeWhere(range),
+    },
+    orderBy: { periodEnd: "asc" },
+    select: {
+      goalNotes: { select: { note: true } },
+    },
+  });
+  const metricKeys = goalMetricProgress.flatMap((goal) => goal.metrics.map((metric) => metric.key));
+  const issueTicketsByMetricKey = collectIssueTicketsByMetricKey(
+    metricKeys,
+    submissions.map((submission) => ({
+      rawDeliveryData: extractRawDeliveryDataFromGoalNotes(submission.goalNotes),
+    }))
+  );
 
   return {
     user: {
@@ -326,7 +751,226 @@ export async function getTeamMemberAnalytics(
     },
     goalProgress,
     goalMetricProgress,
+    issueTicketsByMetricKey,
     ...analytics,
+  };
+}
+
+export async function getTeamCombinedMemberAnalytics(
+  requesterId: string,
+  requesterRole: Role,
+  range?: AnalyticsDateRange
+) {
+  const userFilter = await resolveTeamUserIds(requesterId, requesterRole);
+  const goalMetricProgress = await getGoalMetricProgressForUsers(userFilter, range);
+  const submissions = await prisma.kpiSubmission.findMany({
+    where: {
+      userId: { in: userFilter },
+      status: { in: ANALYTICS_VISIBLE_STATUSES },
+      ...buildSubmissionDateRangeWhere(range),
+    },
+    orderBy: { periodEnd: "asc" },
+    select: {
+      goalNotes: { select: { note: true } },
+    },
+  });
+  const metricKeys = goalMetricProgress.flatMap((goal) => goal.metrics.map((metric) => metric.key));
+  const issueTicketsByMetricKey = collectIssueTicketsByMetricKey(
+    metricKeys,
+    submissions.map((submission) => ({
+      rawDeliveryData: extractRawDeliveryDataFromGoalNotes(submission.goalNotes),
+    }))
+  );
+
+  return {
+    user: {
+      id: "all",
+      name: requesterRole === Role.ADMIN ? "All organization members" : "All team members",
+      email: "",
+      role: requesterRole,
+    },
+    goalProgress: [],
+    goalMetricProgress,
+    issueTicketsByMetricKey,
+    points: [],
+    rollingAverage: [],
+    summary: {
+      total: submissions.length,
+      lastScore: 0,
+      delta: 0,
+    },
+  };
+}
+
+export async function getTeamMetricTrend(
+  requesterId: string,
+  requesterRole: Role,
+  metricId: string,
+  range?: AnalyticsDateRange
+): Promise<TeamMetricTrend> {
+  const metric = await prisma.kpiMetric.findUnique({
+    where: { id: metricId },
+    select: {
+      id: true,
+      label: true,
+      type: true,
+      targetText: true,
+      goal: {
+        select: {
+          id: true,
+          name: true,
+          metrics: { orderBy: { order: "asc" } },
+        },
+      },
+    },
+  });
+
+  if (!metric || !metric.goal) {
+    throw new AppError("Metric not found", 404, "METRIC_NOT_FOUND");
+  }
+
+  const userFilter = await resolveTeamUserIds(requesterId, requesterRole);
+  if (userFilter.length === 0) {
+    return {
+      metric: {
+        metricId: metric.id,
+        label: normalizeMetricLabel(metric.label),
+        type: metric.type,
+        goalId: metric.goal.id,
+        goalName: metric.goal.name,
+        targetText: metric.targetText ?? null,
+      },
+      trend: [],
+    };
+  }
+
+  const goalMetricIds = metric.goal.metrics.map((goalMetric) => goalMetric.id);
+  const rawMetrics = metric.goal.metrics.filter((goalMetric) => !goalMetric.isComputed);
+  const submissions = await prisma.kpiSubmission.findMany({
+    where: {
+      userId: { in: userFilter },
+      status: { in: ANALYTICS_VISIBLE_STATUSES },
+      ...buildSubmissionDateRangeWhere(range),
+    },
+    orderBy: { periodEnd: "asc" },
+    select: {
+      periodStart: true,
+      periodEnd: true,
+      submittedAt: true,
+      values: {
+        where: { metricId: { in: goalMetricIds } },
+        select: { metricId: true, valueNumber: true },
+      },
+    },
+  });
+
+  const monthAggregates = new Map<string, Map<string, MetricAggregate>>();
+  const rangeStart = range?.from ? toUtcDateOnly(range.from) : null;
+  const rangeEnd = range?.to ? toUtcDateOnly(range.to) : null;
+
+  for (const submission of submissions) {
+    let start = toUtcDateOnly(submission.periodStart);
+    let end = toUtcDateOnly(submission.periodEnd);
+    const submittedAt = toUtcDateOnly(submission.submittedAt);
+    if (submittedAt < end) {
+      end = submittedAt;
+    }
+    if (start > end) {
+      continue;
+    }
+    if (rangeStart && end < rangeStart) {
+      continue;
+    }
+    if (rangeEnd && start > rangeEnd) {
+      continue;
+    }
+    if (rangeStart && start < rangeStart) {
+      start = rangeStart;
+    }
+    if (rangeEnd && end > rangeEnd) {
+      end = rangeEnd;
+    }
+    if (start > end) {
+      continue;
+    }
+
+    const valueMap = new Map(submission.values.map((value) => [value.metricId, value.valueNumber]));
+    const monthSegments: Array<{ monthKey: string; daysCovered: number }> = [];
+    let cursor = new Date(start.getTime());
+    while (cursor <= end) {
+      const monthStart = utcMonthStart(cursor);
+      const monthEnd = utcMonthEnd(cursor);
+      const segmentStart = maxDate(start, monthStart);
+      const segmentEnd = minDate(end, monthEnd);
+      const daysCovered = daySpanInclusive(segmentStart, segmentEnd);
+      if (daysCovered > 0) {
+        monthSegments.push({
+          monthKey: utcMonthKey(monthStart),
+          daysCovered,
+        });
+      }
+      cursor = addUtcDays(monthEnd, 1);
+    }
+    if (monthSegments.length === 0) {
+      continue;
+    }
+
+    for (const metricItem of rawMetrics) {
+      const rawValue = valueMap.get(metricItem.id);
+      if (rawValue === null || rawValue === undefined) {
+        continue;
+      }
+
+      monthSegments.forEach((segment) => {
+        const monthEntry = monthAggregates.get(segment.monthKey) ?? new Map();
+        const aggregate = monthEntry.get(metricItem.key) ?? { weightedTotal: 0, totalDays: 0 };
+        aggregate.weightedTotal += rawValue * segment.daysCovered;
+        aggregate.totalDays += segment.daysCovered;
+        monthEntry.set(metricItem.key, aggregate);
+        if (!monthAggregates.has(segment.monthKey)) {
+          monthAggregates.set(segment.monthKey, monthEntry);
+        }
+      });
+    }
+  }
+
+  const trend = Array.from(monthAggregates.entries())
+    .sort(([a], [b]) => (a > b ? 1 : -1))
+    .map(([dateKey, aggregates]) => {
+      const aggregatedValues = rawMetrics
+        .map((metricItem) => {
+          const aggregate = aggregates.get(metricItem.key);
+          if (!aggregate || aggregate.totalDays <= 0) return null;
+          return {
+            metricId: metricItem.id,
+            valueNumber: aggregate.weightedTotal / aggregate.totalDays,
+          };
+        })
+        .filter(Boolean) as Array<{ metricId: string; valueNumber: number }>;
+
+      if (aggregatedValues.length === 0) {
+        return null;
+      }
+
+      const resolved = computeMetricValues(metric.goal.metrics, aggregatedValues);
+      const value = resolved.get(metric.id);
+      if (value === undefined) {
+        return null;
+      }
+      return { date: dateKey, value };
+    })
+    .filter((item): item is { date: string; value: number } => Boolean(item));
+
+  return {
+    metric: {
+      metricId: metric.id,
+      label: normalizeMetricLabel(metric.label),
+      type: metric.type,
+      goalId: metric.goal.id,
+      goalName: metric.goal.name,
+      targetText: metric.targetText ?? null,
+    },
+    trend,
   };
 }
 
@@ -373,16 +1017,34 @@ async function getUserGoalProgress(userId: string, range?: AnalyticsDateRange) {
     { goalId: string; key: string; name: string; monthKey: string; weightedTotal: number; totalDays: number }
   >();
   const goalOrder = new Map<string, number>();
+  const rangeStart = range?.from ? toUtcDateOnly(range.from) : null;
+  const rangeEnd = range?.to ? toUtcDateOnly(range.to) : null;
 
   for (const submission of submissions) {
     const scoreResult = computeOverallScore({
       goals: submission.template.goals,
       values: submission.values,
       overallFormula: submission.template.formula,
+      strict: false,
     });
 
-    const start = toUtcDateOnly(submission.periodStart);
-    const end = toUtcDateOnly(submission.periodEnd);
+    let start = toUtcDateOnly(submission.periodStart);
+    let end = toUtcDateOnly(submission.periodEnd);
+    if (start > end) {
+      continue;
+    }
+    if (rangeStart && end < rangeStart) {
+      continue;
+    }
+    if (rangeEnd && start > rangeEnd) {
+      continue;
+    }
+    if (rangeStart && start < rangeStart) {
+      start = rangeStart;
+    }
+    if (rangeEnd && end > rangeEnd) {
+      end = rangeEnd;
+    }
     if (start > end) {
       continue;
     }
@@ -469,10 +1131,10 @@ async function getUserGoalProgress(userId: string, range?: AnalyticsDateRange) {
     });
 }
 
-async function getUserGoalMetricProgress(userId: string, range?: AnalyticsDateRange) {
+async function getGoalMetricProgressForUsers(userIds: string[], range?: AnalyticsDateRange) {
   const submissions = await prisma.kpiSubmission.findMany({
     where: {
-      userId,
+      userId: { in: userIds },
       status: { in: ANALYTICS_VISIBLE_STATUSES },
       ...buildSubmissionDateRangeWhere(range),
     },
@@ -505,26 +1167,40 @@ async function getUserGoalMetricProgress(userId: string, range?: AnalyticsDateRa
     },
   });
 
-  const byGoalMetricMonth = new Map<
+  const goalDefinitions = new Map<
     string,
     {
       goalId: string;
-      goalKey: string;
-      goalName: string;
-      goalOrder: number;
-      metricId: string;
-      metricKey: string;
-      metricLabel: string;
-      metricType: MetricType;
-      metricOrder: number;
-      weightedTotal: number;
-      totalDays: number;
+      key: string;
+      name: string;
+      order: number;
+      metrics: (typeof submissions)[number]["template"]["goals"][number]["metrics"];
+      displayMetrics: (typeof submissions)[number]["template"]["goals"][number]["metrics"];
     }
   >();
+  const monthAggregates = new Map<string, Map<string, MetricAggregate>>();
+  const rangeAggregates = new Map<string, MetricAggregate>();
+  const rangeStart = range?.from ? toUtcDateOnly(range.from) : null;
+  const rangeEnd = range?.to ? toUtcDateOnly(range.to) : null;
 
   for (const submission of submissions) {
-    const start = toUtcDateOnly(submission.periodStart);
-    const end = toUtcDateOnly(submission.periodEnd);
+    let start = toUtcDateOnly(submission.periodStart);
+    let end = toUtcDateOnly(submission.periodEnd);
+    if (start > end) {
+      continue;
+    }
+    if (rangeStart && end < rangeStart) {
+      continue;
+    }
+    if (rangeEnd && start > rangeEnd) {
+      continue;
+    }
+    if (rangeStart && start < rangeStart) {
+      start = rangeStart;
+    }
+    if (rangeEnd && end > rangeEnd) {
+      end = rangeEnd;
+    }
     if (start > end) {
       continue;
     }
@@ -550,44 +1226,54 @@ async function getUserGoalMetricProgress(userId: string, range?: AnalyticsDateRa
       continue;
     }
 
-    for (const goal of submission.template.goals) {
-      const resolvedValues = computeMetricValues(goal.metrics, submission.values);
-      const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
-      const metricsToDisplay = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
-      const goalAggregateKey = goal.key || goal.id;
-
-      for (const metric of metricsToDisplay) {
-        const metricValue = resolvedValues.get(metric.id);
-        if (metricValue === undefined) {
-          continue;
-        }
-        const metricAggregateKey = metric.key || metric.id;
-
-        for (const segment of monthSegments) {
-          const key = `${goalAggregateKey}::${metricAggregateKey}::${segment.monthKey}`;
-          const existing = byGoalMetricMonth.get(key);
-          if (!existing) {
-            byGoalMetricMonth.set(key, {
-              goalId: goal.id,
-              goalKey: goal.key,
-              goalName: goal.name,
-              goalOrder: goal.order,
-              metricId: metric.id,
-              metricKey: metric.key,
-              metricLabel: metric.label,
-              metricType: metric.type,
-              metricOrder: metric.order,
-              weightedTotal: metricValue * segment.daysCovered,
-              totalDays: segment.daysCovered,
-            });
-            continue;
-          }
-          existing.weightedTotal += metricValue * segment.daysCovered;
-          existing.totalDays += segment.daysCovered;
-        }
-      }
+    const totalDays = monthSegments.reduce((sum, segment) => sum + segment.daysCovered, 0);
+    if (totalDays <= 0) {
+      continue;
     }
+
+    submission.template.goals.forEach((goal) => {
+      const goalKey = goal.key || goal.id;
+      const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
+      const displayMetrics = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
+      if (!goalDefinitions.has(goalKey)) {
+        goalDefinitions.set(goalKey, {
+          goalId: goal.id,
+          key: goal.key,
+          name: goal.name,
+          order: goal.order,
+          metrics: goal.metrics,
+          displayMetrics,
+        });
+      }
+    });
+
+    const valueMap = new Map(submission.values.map((value) => [value.metricId, value.valueNumber]));
+    submission.template.goals.forEach((goal) => {
+      goal.metrics.forEach((metric) => {
+        if (metric.isComputed) return;
+        const rawValue = valueMap.get(metric.id);
+        if (rawValue === null || rawValue === undefined) return;
+
+        monthSegments.forEach((segment) => {
+          const monthEntry = monthAggregates.get(segment.monthKey) ?? new Map();
+          const aggregate = monthEntry.get(metric.key) ?? { weightedTotal: 0, totalDays: 0 };
+          aggregate.weightedTotal += rawValue * segment.daysCovered;
+          aggregate.totalDays += segment.daysCovered;
+          monthEntry.set(metric.key, aggregate);
+          if (!monthAggregates.has(segment.monthKey)) {
+            monthAggregates.set(segment.monthKey, monthEntry);
+          }
+        });
+
+        const rangeAggregate = rangeAggregates.get(metric.key) ?? { weightedTotal: 0, totalDays: 1 };
+        rangeAggregate.weightedTotal += rawValue;
+        rangeAggregate.totalDays = 1;
+        rangeAggregates.set(metric.key, rangeAggregate);
+      });
+    });
   }
+
+  const monthKeys = Array.from(monthAggregates.keys()).sort((a, b) => (a > b ? 1 : -1));
 
   const byGoal = new Map<
     string,
@@ -604,43 +1290,66 @@ async function getUserGoalMetricProgress(userId: string, range?: AnalyticsDateRa
           label: string;
           type: MetricType;
           order: number;
-          total: number;
-          count: number;
+          targetText?: string | null;
+          overallValue: number;
+          trend: Map<string, number>;
         }
       >;
     }
   >();
 
-  Array.from(byGoalMetricMonth.values()).forEach((goalMetricMonth) => {
-    if (goalMetricMonth.totalDays <= 0) {
-      return;
-    }
-    const monthAverage = goalMetricMonth.weightedTotal / goalMetricMonth.totalDays;
-    const goalAggregateKey = goalMetricMonth.goalKey || goalMetricMonth.goalId;
-    const metricAggregateKey = goalMetricMonth.metricKey || goalMetricMonth.metricId;
-    const goalEntry = byGoal.get(goalAggregateKey) ?? {
-      goalId: goalMetricMonth.goalId,
-      key: goalMetricMonth.goalKey,
-      name: goalMetricMonth.goalName,
-      order: goalMetricMonth.goalOrder,
-      metrics: new Map(),
+  goalDefinitions.forEach((goal) => {
+    const goalAggregateKey = goal.key || goal.goalId;
+    const goalEntry = {
+      goalId: goal.goalId,
+      key: goal.key,
+      name: goal.name,
+      order: goal.order,
+      metrics: new Map<
+        string,
+        {
+          metricId: string;
+          key: string;
+          label: string;
+          type: MetricType;
+          order: number;
+          targetText?: string | null;
+          overallValue: number;
+          trend: Map<string, number>;
+        }
+      >(),
     };
-    const metricEntry = goalEntry.metrics.get(metricAggregateKey);
-    if (!metricEntry) {
-      goalEntry.metrics.set(metricAggregateKey, {
-        metricId: goalMetricMonth.metricId,
-        key: goalMetricMonth.metricKey,
-        label: goalMetricMonth.metricLabel,
-        type: goalMetricMonth.metricType,
-        order: goalMetricMonth.metricOrder,
-        total: monthAverage,
-        count: 1,
+
+    const rangeResolved = resolveAggregatedMetricValues(goal.metrics, rangeAggregates);
+    goal.displayMetrics.forEach((metric) => {
+      goalEntry.metrics.set(metric.key, {
+        metricId: metric.id,
+        key: metric.key,
+        label: normalizeMetricLabel(metric.label),
+        type: metric.type,
+        order: metric.order ?? 0,
+        targetText: metric.targetText ?? null,
+        overallValue: rangeResolved.get(metric.key) ?? 0,
+        trend: new Map(),
       });
-    } else {
-      metricEntry.total += monthAverage;
-      metricEntry.count += 1;
+    });
+
+    monthKeys.forEach((monthKey) => {
+      const aggregates = monthAggregates.get(monthKey);
+      if (!aggregates) return;
+      const resolved = resolveAggregatedMetricValues(goal.metrics, aggregates);
+      goal.displayMetrics.forEach((metric) => {
+        const value = resolved.get(metric.key);
+        if (value === undefined) return;
+        const metricEntry = goalEntry.metrics.get(metric.key);
+        if (!metricEntry) return;
+        metricEntry.trend.set(monthKey, value);
+      });
+    });
+
+    if (goalEntry.metrics.size > 0) {
+      byGoal.set(goalAggregateKey, goalEntry);
     }
-    byGoal.set(goalAggregateKey, goalEntry);
   });
 
   return Array.from(byGoal.values())
@@ -653,11 +1362,15 @@ async function getUserGoalMetricProgress(userId: string, range?: AnalyticsDateRa
         .map((metric) => ({
           metricId: metric.metricId,
           key: metric.key,
-          label: metric.label,
+          label: normalizeMetricLabel(metric.label),
           type: metric.type,
-          averageValue: metric.count > 0 ? metric.total / metric.count : 0,
-          submissions: metric.count,
+          averageValue: Number.isFinite(metric.overallValue) ? metric.overallValue : 0,
+          submissions: metric.trend.size,
           order: metric.order,
+          targetText: metric.targetText ?? null,
+          trend: Array.from(metric.trend.entries())
+            .map(([date, value]) => ({ date, value }))
+            .sort((a, b) => (a.date > b.date ? 1 : -1)),
         }))
         .sort((a, b) => {
           if (a.order !== b.order) return a.order - b.order;

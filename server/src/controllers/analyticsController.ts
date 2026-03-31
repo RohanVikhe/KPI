@@ -2,7 +2,9 @@ import type { Request, Response } from "express";
 import { AppError } from "../utils/errors.js";
 import {
   getTeamAnalytics,
+  getTeamCombinedMemberAnalytics,
   getTeamMemberAnalytics,
+  getTeamMetricTrend,
   getUserAnalytics,
   type AnalyticsDateRange,
 } from "../services/analyticsService.js";
@@ -46,6 +48,18 @@ export async function teamMemberAnalyticsHandler(req: Request, res: Response) {
     throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
   }
   const { userId } = req.params as { userId: string };
-  const analytics = await getTeamMemberAnalytics(req.user.id, req.user.role, userId, parseAnalyticsDateRange(req));
+  const analytics =
+    userId === "all"
+      ? await getTeamCombinedMemberAnalytics(req.user.id, req.user.role, parseAnalyticsDateRange(req))
+      : await getTeamMemberAnalytics(req.user.id, req.user.role, userId, parseAnalyticsDateRange(req));
   return res.json({ analytics });
+}
+
+export async function teamMetricTrendHandler(req: Request, res: Response) {
+  if (!req.user) {
+    throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
+  }
+  const { metricId } = req.params as { metricId: string };
+  const metricTrend = await getTeamMetricTrend(req.user.id, req.user.role, metricId, parseAnalyticsDateRange(req));
+  return res.json({ metricTrend });
 }

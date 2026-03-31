@@ -1,5 +1,6 @@
 import { prisma } from "../db/prisma.js";
 import { AppError } from "../utils/errors.js";
+import { normalizeSubmissionTemplateLabels } from "../utils/labels.js";
 import { computeOverallScore, type GoalScore } from "../utils/score.js";
 
 const RAW_DELIVERY_DATA_START = "[[RAW_DELIVERY_DATA_START]]";
@@ -204,13 +205,15 @@ function attachGoalScores<
     goals,
     values: submission.values,
     overallFormula: submission.template?.formula ?? null,
+    strict: false,
   });
   const { goalNotes, rawDeliveryData } = extractRawDeliveryDataFromGoalNotes(submission.goalNotes);
   const withSanitizedNotes =
     goalNotes && goalNotes !== submission.goalNotes
       ? ({ ...submission, goalNotes } as T)
       : submission;
-  return { ...withSanitizedNotes, goalScores, rawDeliveryData };
+  const normalizedSubmission = normalizeSubmissionTemplateLabels(withSanitizedNotes);
+  return { ...normalizedSubmission, goalScores, rawDeliveryData };
 }
 
 export async function createSubmission(userId: string, input: SubmissionInput) {
@@ -369,6 +372,10 @@ export async function listMySubmissions(
     include: {
       template: { include: { goals: { orderBy: { order: "asc" }, include: { metrics: { orderBy: { order: "asc" } } } } } },
       values: true,
+      goalNotes: {
+        include: { goal: { select: { id: true, key: true, name: true } } },
+        orderBy: { createdAt: "asc" },
+      },
     },
   });
   return submissions.map((submission) => attachGoalScores(submission));

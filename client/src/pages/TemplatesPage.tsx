@@ -379,7 +379,7 @@ export default function TemplatesPage() {
                   <input
                     value={goal.formula}
                     onChange={(event) => updateGoal(goalIndex, { formula: event.target.value })}
-                    placeholder="(billing_achievement_pct + gross_margin_pct) / 2"
+                    placeholder="(on_time_delivery + first_time_right) / 2"
                   />
                 </label>
                 <label className="form-field">
@@ -387,7 +387,7 @@ export default function TemplatesPage() {
                   <input
                     value={goal.description}
                     onChange={(event) => updateGoal(goalIndex, { description: event.target.value })}
-                    placeholder="Revenue, margin, utilization, and bench cost performance"
+                    placeholder="Delivery efficiency, quality, and process adherence overview"
                   />
                 </label>
               </div>

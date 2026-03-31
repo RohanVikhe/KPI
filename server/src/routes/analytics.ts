@@ -7,10 +7,12 @@ import {
   myAnalyticsHandler,
   teamAnalyticsHandler,
   teamMemberAnalyticsHandler,
+  teamMetricTrendHandler,
 } from "../controllers/analyticsController.js";
 
 const router = Router();
-const userIdSchema = z.object({ userId: z.string().cuid() });
+const userIdSchema = z.object({ userId: z.union([z.literal("all"), z.string().cuid()]) });
+const metricIdSchema = z.object({ metricId: z.string().cuid() });
 const analyticsQuerySchema = z
   .object({
     from: z
@@ -42,6 +44,14 @@ router.get(
   validateParams(userIdSchema),
   validateQuery(analyticsQuerySchema),
   teamMemberAnalyticsHandler
+);
+router.get(
+  "/team/metric/:metricId",
+  authenticate,
+  requireRole(Role.MANAGER, Role.ADMIN),
+  validateParams(metricIdSchema),
+  validateQuery(analyticsQuerySchema),
+  teamMetricTrendHandler
 );
 
 export default router;

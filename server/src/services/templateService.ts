@@ -1,6 +1,7 @@
 import { MetricType, Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma.js";
 import { AppError } from "../utils/errors.js";
+import { normalizeTemplateMetricLabels } from "../utils/labels.js";
 
 type MetricInput = {
   key: string;
@@ -54,7 +55,7 @@ function assertUniqueGoalKeys(goals: GoalInput[]) {
 }
 
 export async function listTemplates() {
-  return prisma.kpiTemplate.findMany({
+  const templates = await prisma.kpiTemplate.findMany({
     orderBy: { createdAt: "desc" },
     include: {
       goals: {
@@ -63,6 +64,7 @@ export async function listTemplates() {
       },
     },
   });
+  return templates.map((template) => normalizeTemplateMetricLabels(template));
 }
 
 export async function getTemplate(id: string) {
@@ -80,7 +82,7 @@ export async function getTemplate(id: string) {
     throw new AppError("Template not found", 404, "TEMPLATE_NOT_FOUND");
   }
 
-  return template;
+  return normalizeTemplateMetricLabels(template);
 }
 
 export async function createTemplate(input: TemplateInput, createdById: string) {
@@ -154,7 +156,7 @@ export async function createTemplate(input: TemplateInput, createdById: string) 
       throw new AppError("Template not found", 404, "TEMPLATE_NOT_FOUND");
     }
 
-    return fullTemplate;
+    return normalizeTemplateMetricLabels(fullTemplate);
   });
 }
 
@@ -222,7 +224,7 @@ export async function updateTemplate(id: string, input: Partial<TemplateInput>) 
       }
     }
 
-    return tx.kpiTemplate.findUnique({
+    const fullTemplate = await tx.kpiTemplate.findUnique({
       where: { id: template.id },
       include: {
         goals: {
@@ -231,6 +233,7 @@ export async function updateTemplate(id: string, input: Partial<TemplateInput>) 
         },
       },
     });
+    return fullTemplate ? normalizeTemplateMetricLabels(fullTemplate) : fullTemplate;
   });
 }
 

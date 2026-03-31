@@ -1,24 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Area, AreaChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { apiFetch } from "../lib/api.ts";
 import { useAuth } from "../lib/auth.tsx";
-
-const TEAM_RANKING_PAGE_SIZE = 8;
-const GOAL_COLORS = ["#f29d38", "#44d9e6", "#7c8cff", "#f468a5", "#6bf0a1"];
-const IMPROVEMENT_MAX_PROGRESS = 59.999;
+import type { Template } from "../lib/types.ts";
+import DateRangePicker from "../components/DateRangePicker.tsx";
 
 type UserAnalytics = {
   points: { date: string; score: number }[];
@@ -30,6 +17,23 @@ type TeamAnalytics = {
   ranking: { userId: string; name: string; averageScore: number; submissions: number }[];
   trend: { date: string; averageScore: number }[];
   summary: { totalEmployees: number; averageScore: number };
+};
+
+type TeamMetricTrend = {
+  metric: {
+    metricId: string;
+    label: string;
+    type: "NUMBER" | "PERCENT" | "CURRENCY";
+    goalId: string;
+    goalName: string;
+    targetText?: string | null;
+  };
+  trend: { date: string; value: number }[];
+};
+
+type IssueTicket = {
+  id: string;
+  link?: string | null;
 };
 
 type TeamMemberAnalytics = UserAnalytics & {
@@ -47,32 +51,24 @@ type TeamMemberAnalytics = UserAnalytics & {
     key: string;
     name: string;
     order: number;
-    metrics: {
-      metricId: string;
-      key: string;
-      label: string;
-      type: "NUMBER" | "PERCENT" | "CURRENCY";
-      averageValue: number;
-      submissions: number;
-      order: number;
-    }[];
+      metrics: {
+        metricId: string;
+        key: string;
+        label: string;
+        type: "NUMBER" | "PERCENT" | "CURRENCY";
+        targetText?: string | null;
+        averageValue: number;
+        submissions: number;
+        order: number;
+        trend: { date: string; value: number }[];
+      }[];
   }[];
+  issueTicketsByMetricKey?: Record<string, IssueTicket[]>;
 };
 
-type GoalProgressView = TeamMemberAnalytics["goalProgress"][number] & { progress: number };
 type GoalMetricProgressView = TeamMemberAnalytics["goalMetricProgress"][number];
 
-function shortenLabel(value: string, max = 14) {
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 1)}...`;
-}
-
-function normalizeProgress(score: number) {
-  if (!Number.isFinite(score)) return 0;
-  if (score >= 0 && score <= 1) return Math.min(100, Math.max(0, score * 100));
-  if (score > 1 && score <= 5) return Math.min(100, Math.max(0, (score / 5) * 100));
-  return Math.min(100, Math.max(0, score));
-}
+const ALL_TEAM_MEMBERS_ID = "all";
 
 function formatChartValue(value: unknown) {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -100,11 +96,40 @@ function buildAnalyticsDateQuery(fromDate: string, toDate: string) {
   return query ? `?${query}` : "";
 }
 
-function goalPerformanceBand(progress: number) {
-  if (progress >= 80) return "Strong";
-  if (progress >= 60) return "Healthy";
-  if (progress >= 40) return "Needs Attention";
-  return "Critical";
+function formatTrendDateLabel(value: string) {
+  if (!value) return "";
+  const date = /^\d{4}-\d{2}$/.test(value)
+    ? new Date(`${value}-01T00:00:00.000Z`)
+    : new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    ...( /^\d{4}-\d{2}$/.test(value) ? { year: "numeric" as const } : { day: "numeric" as const }),
+  }).format(date);
+}
+
+function toUtcMonthKey(date: Date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function parseMonthKey(value: string) {
+  if (!/^\d{4}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}-01T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function parseMonthStartFromDate(value: string) {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function addUtcMonths(date: Date, months: number) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1));
 }
 
 function formatMetricAverage(value: number, type: "NUMBER" | "PERCENT" | "CURRENCY") {
@@ -120,16 +145,151 @@ function formatMetricAverage(value: number, type: "NUMBER" | "PERCENT" | "CURREN
   return value.toFixed(2);
 }
 
+function getMetricProgressPercent(value: number, type: "NUMBER" | "PERCENT" | "CURRENCY") {
+  if (type !== "PERCENT" || !Number.isFinite(value)) return null;
+  return Math.min(100, Math.max(0, value));
+}
+
+type TargetRange = {
+  min?: number;
+  max?: number;
+  minInclusive?: boolean;
+  maxInclusive?: boolean;
+  enforceMin?: boolean;
+  enforceMax?: boolean;
+};
+
+type MetricTargetStatus = "in" | "out" | "unknown";
+
+type SnapshotThresholdRule = {
+  direction: "min" | "max";
+  value: number;
+};
+
+const SNAPSHOT_THRESHOLD_BY_KEY: Record<string, SnapshotThresholdRule> = {
+  additional_initiatives_delivered: { direction: "min", value: 1 },
+  vc_additional_initiatives: { direction: "min", value: 1 },
+  delivery_error_rework_rate: { direction: "max", value: 5 },
+  qp_rework_count: { direction: "max", value: 5 },
+};
+
+function parseTargetRange(
+  targetText?: string | null,
+  metricType?: "NUMBER" | "PERCENT" | "CURRENCY"
+): TargetRange | null {
+  if (!targetText) return null;
+  const normalized = targetText.toLowerCase().replace(/,/g, " ").replace(/\u2013/g, "-");
+  const numbers = normalized.match(/-?\d+(\.\d+)?/g)?.map((value) => Number(value)) ?? [];
+  if (numbers.length === 0) return null;
+
+  const hasRangeText = /(\d+(\.\d+)?)\s*-\s*(\d+(\.\d+)?)/.test(normalized) || normalized.includes(" range");
+  const hasToText = /\bto\b/.test(normalized);
+  const hasExplicitMax = /(<=|â‰¤|<|at most|no more than|max(imum)?|upper|not exceed)/.test(normalized);
+  const hasExplicitMin = /(>=|â‰¥|>|at least|min(imum)?|not less than)/.test(normalized);
+  const maxInclusive = normalized.includes("<=") || normalized.includes("â‰¤") || normalized.includes("at most") || normalized.includes("no more than");
+  const maxExclusive = normalized.includes("<") && !normalized.includes("<=");
+  const minInclusive = normalized.includes(">=") || normalized.includes("â‰¥") || normalized.includes("at least") || normalized.includes("not less than");
+  const minExclusive = normalized.includes(">") && !normalized.includes(">=");
+  const isPercent = metricType === "PERCENT" || normalized.includes("%");
+  const rangeUpperBound = Math.max(...numbers);
+  const shouldEnforceMaxForRange = !isPercent || hasExplicitMax || rangeUpperBound <= 90;
+
+  if (numbers.length >= 2 && (hasRangeText || hasToText)) {
+    const min = Math.min(...numbers);
+    const max = Math.max(...numbers);
+    return {
+      min,
+      max,
+      minInclusive: true,
+      maxInclusive: true,
+      enforceMin: true,
+      enforceMax: shouldEnforceMaxForRange,
+    };
+  }
+
+  const range: TargetRange = {};
+  if (hasExplicitMin || minInclusive || minExclusive) {
+    range.min = numbers[0];
+    range.minInclusive = minInclusive;
+    range.enforceMin = true;
+  }
+  if (hasExplicitMax || maxInclusive || maxExclusive) {
+    range.max = numbers[0];
+    range.maxInclusive = maxInclusive;
+    range.enforceMax = true;
+  }
+
+  if (range.min === undefined && range.max === undefined && numbers.length >= 2) {
+    const min = Math.min(...numbers);
+    const max = Math.max(...numbers);
+    return {
+      min,
+      max,
+      minInclusive: true,
+      maxInclusive: true,
+      enforceMin: true,
+      enforceMax: shouldEnforceMaxForRange,
+    };
+  }
+
+  if (range.min === undefined && range.max === undefined) {
+    return null;
+  }
+
+  if (range.min !== undefined && range.enforceMin === undefined) {
+    range.enforceMin = true;
+  }
+  if (range.max !== undefined && range.enforceMax === undefined) {
+    range.enforceMax = true;
+  }
+
+  return range;
+}
+
+function getTargetStatus(value: number | null | undefined, range: TargetRange | null): MetricTargetStatus {
+  if (value === null || value === undefined || Number.isNaN(value)) return "unknown";
+  if (!range || (range.min === undefined && range.max === undefined)) return "unknown";
+
+  if (range.enforceMin && range.min !== undefined) {
+    if (value < range.min) return "out";
+    if (value === range.min && range.minInclusive === false) return "out";
+  }
+  if (range.enforceMax && range.max !== undefined) {
+    if (value > range.max) return "out";
+    if (value === range.max && range.maxInclusive === false) return "out";
+  }
+  return "in";
+}
+
+function getThresholdStatus(metricKey: string, value: number | null | undefined): MetricTargetStatus | null {
+  if (value === null || value === undefined || Number.isNaN(value)) return null;
+  const rule = SNAPSHOT_THRESHOLD_BY_KEY[metricKey];
+  if (!rule) return null;
+  if (rule.direction === "min") {
+    return value < rule.value ? "out" : "in";
+  }
+  return value > rule.value ? "out" : "in";
+}
+
+function isReworkMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("rework");
+}
+
+function isAdditionalInitiativesMetricKey(metricKey: string) {
+  return metricKey.toLowerCase().includes("additional_initiatives");
+}
+
 export default function AnalyticsPage() {
   const { user } = useAuth();
   const canViewTeamAnalytics = user?.role === "MANAGER" || user?.role === "ADMIN";
   const [showPersonalSection, setShowPersonalSection] = useState(!canViewTeamAnalytics);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
-  const [rankingQuery, setRankingQuery] = useState("");
-  const [rankingPage, setRankingPage] = useState(1);
-  const [selectedMemberId, setSelectedMemberId] = useState("");
-  const [selectedMetricGoalId, setSelectedMetricGoalId] = useState("");
+  const [selectedMemberId, setSelectedMemberId] = useState(ALL_TEAM_MEMBERS_ID);
+  const [teamMetricGoalId, setTeamMetricGoalId] = useState("");
+  const [teamMetricId, setTeamMetricId] = useState("");
+  const [expandedSnapshotKeys, setExpandedSnapshotKeys] = useState<Set<string>>(new Set());
   const isDateRangeInvalid = Boolean(fromDate && toDate && fromDate > toDate);
   const analyticsDateQuery = useMemo(() => buildAnalyticsDateQuery(fromDate, toDate), [fromDate, toDate]);
   const activeDateRangeLabel = useMemo(() => {
@@ -151,6 +311,12 @@ export default function AnalyticsPage() {
     enabled: canViewTeamAnalytics && !isDateRangeInvalid,
   });
 
+  const { data: templatesData } = useQuery({
+    queryKey: ["templates", "analytics"],
+    queryFn: () => apiFetch<{ templates: Template[] }>("/templates"),
+    enabled: canViewTeamAnalytics,
+  });
+
   const { data: teamMemberData, isLoading: memberLoading, error: memberError } = useQuery({
     queryKey: ["analytics", "team", "member", selectedMemberId, fromDate, toDate],
     queryFn: () =>
@@ -161,74 +327,60 @@ export default function AnalyticsPage() {
   const userAnalytics = userData?.analytics;
   const teamAnalytics = teamData?.analytics;
   const teamMemberAnalytics = teamMemberData?.analytics;
-
-  const filteredRanking = useMemo(() => {
-    const allRanking = teamAnalytics?.ranking ?? [];
-    const search = rankingQuery.trim().toLowerCase();
-    if (!search) {
-      return allRanking;
-    }
-    return allRanking.filter((member) => member.name.toLowerCase().includes(search));
-  }, [teamAnalytics?.ranking, rankingQuery]);
-
-  const totalRankingPages = Math.max(1, Math.ceil(filteredRanking.length / TEAM_RANKING_PAGE_SIZE));
-  const currentRankingPage = Math.min(rankingPage, totalRankingPages);
-  const rankingPageStart = (currentRankingPage - 1) * TEAM_RANKING_PAGE_SIZE;
-  const visibleRanking = useMemo(
-    () => filteredRanking.slice(rankingPageStart, rankingPageStart + TEAM_RANKING_PAGE_SIZE),
-    [filteredRanking, rankingPageStart]
+  const templates = templatesData?.templates ?? [];
+  const activeTemplate = useMemo(
+    () => templates.find((template) => template.isActive) ?? templates[0] ?? null,
+    [templates]
   );
-  const rankingChartHeight = useMemo(() => {
-    const rows = Math.max(visibleRanking.length, 1);
-    return Math.min(380, Math.max(190, rows * 40 + 88));
-  }, [visibleRanking.length]);
-  const rankingStart = filteredRanking.length === 0 ? 0 : rankingPageStart + 1;
-  const rankingEnd = Math.min(rankingPageStart + TEAM_RANKING_PAGE_SIZE, filteredRanking.length);
-  const teamTrendChartHeight = useMemo(() => {
-    const points = teamAnalytics?.trend.length ?? 0;
-    if (points <= 3) return 210;
-    if (points <= 8) return 240;
-    return 280;
-  }, [teamAnalytics?.trend.length]);
-  const memberGoalProgress = teamMemberAnalytics?.goalProgress ?? [];
-  const memberGoalMetricProgress = teamMemberAnalytics?.goalMetricProgress ?? [];
-  const compactMemberGoalProgress = useMemo<GoalProgressView[]>(() => {
-    return memberGoalProgress
-      .map((goal) => ({
-        ...goal,
-        progress: normalizeProgress(goal.averageScore),
-      }))
+
+  const teamMetricGoals = useMemo(() => {
+    if (!activeTemplate) return [];
+    return activeTemplate.goals
+      .map((goal) => {
+        const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
+        const displayMetrics = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
+        return {
+          goalId: goal.id,
+          name: goal.name,
+          order: goal.order ?? 0,
+          metrics: displayMetrics
+            .map((metric) => ({
+              metricId: metric.id,
+              label: metric.label,
+              type: metric.type,
+              order: metric.order ?? 0,
+            }))
+            .sort((a, b) => {
+              if (a.order !== b.order) return a.order - b.order;
+              return a.label.localeCompare(b.label);
+            }),
+        };
+      })
+      .filter((goal) => goal.metrics.length > 0)
       .sort((a, b) => {
         if (a.order !== b.order) return a.order - b.order;
         return a.name.localeCompare(b.name);
       });
-  }, [memberGoalProgress]);
-  const showGoalProgressSection = compactMemberGoalProgress.length > 0 && compactMemberGoalProgress.length <= 6;
-  const memberGoalOverallProgress = useMemo(() => {
-    if (!showGoalProgressSection) return null;
-    const total = compactMemberGoalProgress.reduce((sum, goal) => sum + goal.progress, 0);
-    return compactMemberGoalProgress.length > 0 ? total / compactMemberGoalProgress.length : 0;
-  }, [compactMemberGoalProgress, showGoalProgressSection]);
-  const topGoalStrengths = useMemo(
-    () =>
-      compactMemberGoalProgress
-        .filter((goal) => goal.progress > IMPROVEMENT_MAX_PROGRESS)
-        .slice()
-        .sort((a, b) => b.progress - a.progress)
-        .slice(),
-    [compactMemberGoalProgress]
-  );
-  const focusGoalAreas = useMemo(
-    () =>
-      compactMemberGoalProgress
-        .slice()
-        .filter((goal) => goal.progress <= IMPROVEMENT_MAX_PROGRESS)
-        .sort((a, b) => {
-          if (a.progress !== b.progress) return a.progress - b.progress;
-          return a.averageScore - b.averageScore;
-        }),
-    [compactMemberGoalProgress]
-  );
+  }, [activeTemplate]);
+
+  const selectedTeamMetricGoal = useMemo(() => {
+    if (teamMetricGoals.length === 0) return null;
+    return teamMetricGoals.find((goal) => goal.goalId === teamMetricGoalId) ?? teamMetricGoals[0];
+  }, [teamMetricGoals, teamMetricGoalId]);
+  const selectedTeamMetric = useMemo(() => {
+    if (!selectedTeamMetricGoal || selectedTeamMetricGoal.metrics.length === 0) return null;
+    return (
+      selectedTeamMetricGoal.metrics.find((metric) => metric.metricId === teamMetricId) ??
+      selectedTeamMetricGoal.metrics[0]
+    );
+  }, [selectedTeamMetricGoal, teamMetricId]);
+
+  const filteredMembers = useMemo(() => {
+    const allMembers = teamAnalytics?.ranking ?? [];
+    return allMembers.slice().sort((a, b) => a.name.localeCompare(b.name));
+  }, [teamAnalytics?.ranking]);
+  const isAllTeamMembersView = selectedMemberId === ALL_TEAM_MEMBERS_ID || teamMemberAnalytics?.user.id === ALL_TEAM_MEMBERS_ID;
+  const memberGoalMetricProgress = teamMemberAnalytics?.goalMetricProgress ?? [];
   const metricGoalProgress = useMemo<GoalMetricProgressView[]>(() => {
     return memberGoalMetricProgress
       .filter((goal) => goal.metrics.length > 0)
@@ -238,20 +390,83 @@ export default function AnalyticsPage() {
         return a.name.localeCompare(b.name);
       });
   }, [memberGoalMetricProgress]);
-  const selectedMetricGoal = useMemo(() => {
-    if (metricGoalProgress.length === 0) return null;
-    return metricGoalProgress.find((goal) => goal.goalId === selectedMetricGoalId) ?? metricGoalProgress[0];
-  }, [metricGoalProgress, selectedMetricGoalId]);
+  const memberMetricSnapshotRows = useMemo(() => {
+    return metricGoalProgress.flatMap((goal) => {
+      const sortedMetrics = goal.metrics.slice().sort((a, b) => {
+        if (a.order !== b.order) return a.order - b.order;
+        return a.label.localeCompare(b.label);
+      });
+      return sortedMetrics.map((metric) => ({
+        goalId: goal.goalId,
+        goalName: goal.name,
+        goalOrder: goal.order,
+        metricId: metric.metricId,
+        key: metric.key,
+        label: metric.label,
+        type: metric.type,
+        targetText: metric.targetText ?? null,
+        averageValue: metric.averageValue,
+        submissions: metric.submissions,
+        order: metric.order,
+      }));
+    });
+  }, [metricGoalProgress]);
+  const metricIssueTicketsByKey = useMemo(() => {
+    const entries = teamMemberAnalytics?.issueTicketsByMetricKey ?? {};
+    return new Map<string, IssueTicket[]>(Object.entries(entries));
+  }, [teamMemberAnalytics?.issueTicketsByMetricKey]);
 
   useEffect(() => {
-    setRankingPage(1);
-  }, [rankingQuery, fromDate, toDate]);
+    setExpandedSnapshotKeys(new Set());
+  }, [selectedMemberId, fromDate, toDate, memberMetricSnapshotRows.length]);
 
-  useEffect(() => {
-    if (rankingPage > totalRankingPages) {
-      setRankingPage(totalRankingPages);
+  const {
+    data: teamMetricTrendData,
+    isLoading: teamMetricTrendLoading,
+    error: teamMetricTrendError,
+  } = useQuery({
+    queryKey: ["analytics", "team", "metric", teamMetricId, fromDate, toDate],
+    queryFn: () =>
+      apiFetch<{ metricTrend: TeamMetricTrend }>(`/analytics/team/metric/${teamMetricId}${analyticsDateQuery}`),
+    enabled: canViewTeamAnalytics && Boolean(teamMetricId) && !isDateRangeInvalid,
+  });
+  const teamMetricTrend = teamMetricTrendData?.metricTrend;
+  const teamMetricTrendPoints = teamMetricTrend?.trend ?? [];
+  const displayTeamMetricTrendPoints = useMemo(() => {
+    if (teamMetricTrendPoints.length !== 1 || (!fromDate && !toDate)) {
+      return teamMetricTrendPoints;
     }
-  }, [rankingPage, totalRankingPages]);
+
+    const onlyPoint = teamMetricTrendPoints[0];
+    if (!onlyPoint || typeof onlyPoint.value !== "number" || !Number.isFinite(onlyPoint.value)) {
+      return teamMetricTrendPoints;
+    }
+
+    const startMonth = parseMonthStartFromDate(fromDate) ?? parseMonthKey(onlyPoint.date);
+    const endMonth = parseMonthStartFromDate(toDate) ?? parseMonthKey(onlyPoint.date);
+    if (!startMonth || !endMonth || startMonth > endMonth) {
+      return teamMetricTrendPoints;
+    }
+
+    const filledPoints: { date: string; value: number }[] = [];
+    for (let cursor = new Date(startMonth.getTime()); cursor <= endMonth; cursor = addUtcMonths(cursor, 1)) {
+      filledPoints.push({
+        date: toUtcMonthKey(cursor),
+        value: onlyPoint.value,
+      });
+    }
+
+    return filledPoints.length > 1 ? filledPoints : teamMetricTrendPoints;
+  }, [fromDate, toDate, teamMetricTrendPoints]);
+  const teamMetricLatestValue = useMemo(() => {
+    for (let index = displayTeamMetricTrendPoints.length - 1; index >= 0; index -= 1) {
+      const value = displayTeamMetricTrendPoints[index]?.value;
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+      }
+    }
+    return null;
+  }, [displayTeamMetricTrendPoints]);
 
   useEffect(() => {
     setShowPersonalSection(!canViewTeamAnalytics);
@@ -259,31 +474,55 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     if (!canViewTeamAnalytics) {
-      setSelectedMemberId("");
-      setSelectedMetricGoalId("");
+      setSelectedMemberId(ALL_TEAM_MEMBERS_ID);
       return;
     }
-    if (!selectedMemberId) {
-      setSelectedMetricGoalId("");
+    if (selectedMemberId === ALL_TEAM_MEMBERS_ID) {
       return;
     }
-    if (!filteredRanking.some((member) => member.userId === selectedMemberId)) {
-      setSelectedMemberId("");
-      setSelectedMetricGoalId("");
+    const allMembers = teamAnalytics?.ranking ?? [];
+    if (!allMembers.some((member) => member.userId === selectedMemberId)) {
+      setSelectedMemberId(ALL_TEAM_MEMBERS_ID);
     }
-  }, [canViewTeamAnalytics, filteredRanking, selectedMemberId]);
+  }, [canViewTeamAnalytics, selectedMemberId, teamAnalytics?.ranking]);
 
   useEffect(() => {
-    if (metricGoalProgress.length === 0) {
-      if (selectedMetricGoalId) {
-        setSelectedMetricGoalId("");
+    if (teamMetricGoals.length === 0) {
+      if (teamMetricGoalId) {
+        setTeamMetricGoalId("");
+      }
+      if (teamMetricId) {
+        setTeamMetricId("");
       }
       return;
     }
-    if (!metricGoalProgress.some((goal) => goal.goalId === selectedMetricGoalId)) {
-      setSelectedMetricGoalId(metricGoalProgress[0].goalId);
+    if (!teamMetricGoals.some((goal) => goal.goalId === teamMetricGoalId)) {
+      setTeamMetricGoalId(teamMetricGoals[0].goalId);
     }
-  }, [metricGoalProgress, selectedMetricGoalId]);
+  }, [teamMetricGoals, teamMetricGoalId, teamMetricId]);
+  useEffect(() => {
+    if (!selectedTeamMetricGoal || selectedTeamMetricGoal.metrics.length === 0) {
+      if (teamMetricId) {
+        setTeamMetricId("");
+      }
+      return;
+    }
+    if (!selectedTeamMetricGoal.metrics.some((metric) => metric.metricId === teamMetricId)) {
+      setTeamMetricId(selectedTeamMetricGoal.metrics[0].metricId);
+    }
+  }, [selectedTeamMetricGoal, teamMetricId]);
+
+  const toggleSnapshotDetails = (metricKey: string) => {
+    setExpandedSnapshotKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(metricKey)) {
+        next.delete(metricKey);
+      } else {
+        next.add(metricKey);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="page">
@@ -301,28 +540,35 @@ export default function AnalyticsPage() {
 
       <div className="panel analytics-date-panel">
         <div className="panel-header">
-          <h3>Analytics Date Range</h3>
-          <span className="panel-sub">Applies to personal, team, and focused-user insights</span>
+          <h3>Analytics Filters</h3>
+          <span className="panel-sub">Date range applies to personal, team, and focused-user insights</span>
         </div>
         <div className="form-grid team-filter-grid">
-          <label className="form-field">
-            <span>From</span>
-            <input
-              type="date"
-              value={fromDate}
-              max={toDate || undefined}
-              onChange={(event) => setFromDate(event.target.value)}
-            />
-          </label>
-          <label className="form-field">
-            <span>To</span>
-            <input
-              type="date"
-              value={toDate}
-              min={fromDate || undefined}
-              onChange={(event) => setToDate(event.target.value)}
-            />
-          </label>
+          <DateRangePicker
+            fromDate={fromDate}
+            toDate={toDate}
+            onChangeFrom={setFromDate}
+            onChangeTo={setToDate}
+          />
+          {canViewTeamAnalytics && (
+            <>
+              <label className="form-field">
+                <span>Focus user</span>
+                <select
+                  value={selectedMemberId}
+                  onChange={(event) => setSelectedMemberId(event.target.value)}
+                  disabled={filteredMembers.length === 0}
+                >
+                  <option value={ALL_TEAM_MEMBERS_ID}>All</option>
+                  {filteredMembers.map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {member.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
         </div>
         <div className="table-actions">
           <span className="panel-sub">Active range: {activeDateRangeLabel}</span>
@@ -337,7 +583,7 @@ export default function AnalyticsPage() {
             Reset range
           </button>
         </div>
-        {isDateRangeInvalid && <div className="form-error">From date must be before or equal to To date.</div>}
+        {isDateRangeInvalid && <div className="form-error">Start date must be before or equal to end date.</div>}
       </div>
 
       {showPersonalSection &&
@@ -345,77 +591,56 @@ export default function AnalyticsPage() {
           <div className="panel empty-state">Select a valid date range to load personal analytics.</div>
         ) : (
           <>
-          <div className="stats-grid">
-            <div className="stat-card">
-              <div className="stat-label">Latest KPI</div>
-              <div className="stat-value">{userAnalytics?.summary.lastScore.toFixed(2) ?? "0.00"}</div>
-              <div className="stat-sub">Most recent performance score</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Delta</div>
-              <div className="stat-value">
-                {userAnalytics ? (userAnalytics.summary.delta >= 0 ? "+" : "") : ""}
-                {userAnalytics?.summary.delta.toFixed(2) ?? "0.00"}
+            <div className="chart-grid">
+              <div className="panel chart-card">
+                <div className="panel-header">
+                  <h3>Personal KPI Trend</h3>
+                  <span className="panel-sub">Rolling average vs raw score</span>
+                </div>
+                <div className="chart">
+                  {userLoading ? (
+                    <div className="empty-state">Loading analytics...</div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={260}>
+                      <AreaChart data={userAnalytics?.points ?? []}>
+                        <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={24} />
+                        <YAxis tickLine={false} axisLine={false} />
+                        <Tooltip formatter={(value) => formatChartValue(value)} />
+                        <Area type="monotone" dataKey="score" stroke="#f29d38" fill="rgba(242, 157, 56, 0.25)" />
+                        <Line
+                          type="monotone"
+                          dataKey="score"
+                          stroke="#f29d38"
+                          strokeWidth={2}
+                          dot={false}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
               </div>
-              <div className="stat-sub">Change vs previous period</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Total Entries</div>
-              <div className="stat-value">{userAnalytics?.summary.total ?? 0}</div>
-              <div className="stat-sub">Submissions tracked</div>
-            </div>
-          </div>
 
-          <div className="chart-grid">
-            <div className="panel chart-card">
-              <div className="panel-header">
-                <h3>Personal KPI Trend</h3>
-                <span className="panel-sub">Rolling average vs raw score</span>
-              </div>
-              <div className="chart">
-                {userLoading ? (
-                  <div className="empty-state">Loading analytics...</div>
-                ) : (
-                  <ResponsiveContainer width="100%" height={260}>
-                    <AreaChart data={userAnalytics?.points ?? []}>
-                      <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={24} />
-                      <YAxis tickLine={false} axisLine={false} />
-                      <Tooltip formatter={(value) => formatChartValue(value)} />
-                      <Area type="monotone" dataKey="score" stroke="#f29d38" fill="rgba(242, 157, 56, 0.25)" />
-                      <Line
-                        type="monotone"
-                        dataKey="score"
-                        stroke="#f29d38"
-                        strokeWidth={2}
-                        dot={false}
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                )}
+              <div className="panel chart-card">
+                <div className="panel-header">
+                  <h3>Rolling Average</h3>
+                  <span className="panel-sub">3-period smoothing</span>
+                </div>
+                <div className="chart">
+                  {userLoading ? (
+                    <div className="empty-state">Loading analytics...</div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={260}>
+                      <LineChart data={userAnalytics?.rollingAverage ?? []}>
+                        <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={24} />
+                        <YAxis tickLine={false} axisLine={false} />
+                        <Tooltip formatter={(value) => formatChartValue(value)} />
+                        <Line type="monotone" dataKey="value" stroke="#44d9e6" strokeWidth={3} dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
               </div>
             </div>
-
-            <div className="panel chart-card">
-              <div className="panel-header">
-                <h3>Rolling Average</h3>
-                <span className="panel-sub">3-period smoothing</span>
-              </div>
-              <div className="chart">
-                {userLoading ? (
-                  <div className="empty-state">Loading analytics...</div>
-                ) : (
-                  <ResponsiveContainer width="100%" height={260}>
-                    <LineChart data={userAnalytics?.rollingAverage ?? []}>
-                      <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={24} />
-                      <YAxis tickLine={false} axisLine={false} />
-                      <Tooltip formatter={(value) => formatChartValue(value)} />
-                      <Line type="monotone" dataKey="value" stroke="#44d9e6" strokeWidth={3} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-            </div>
-          </div>
           </>
         ))}
 
@@ -435,116 +660,123 @@ export default function AnalyticsPage() {
             <div className="analytics-section">
               <div className="analytics-inline-meta">
                 <span className="panel-sub">Members tracked: {teamAnalytics.summary.totalEmployees}</span>
-                <span className="panel-sub">Team average: {teamAnalytics.summary.averageScore.toFixed(2)}</span>
               </div>
 
-              <div className="analytics-filter-bar">
-                <label className="form-field">
-                  <span>Find member</span>
-                  <input
-                    value={rankingQuery}
-                    onChange={(event) => setRankingQuery(event.target.value)}
-                    placeholder="Search by name"
-                  />
-                </label>
-                <label className="form-field">
-                  <span>Focus user</span>
-                  <select
-                    value={selectedMemberId}
-                    onChange={(event) => setSelectedMemberId(event.target.value)}
-                    disabled={filteredRanking.length === 0}
-                  >
-                    <option value="">Select user</option>
-                    {filteredRanking.map((member) => (
-                      <option key={member.userId} value={member.userId}>
-                        {member.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-
-              <div className="analytics-team-grid">
-                <div className="chart-card panel">
-                  <div className="panel-header">
-                    <h4>Ranking</h4>
-                    <span className="panel-sub">
-                      Showing {rankingStart}-{rankingEnd} of {filteredRanking.length} members
-                    </span>
-                  </div>
-                  {visibleRanking.length === 0 ? (
-                    <div className="empty-state">No ranking rows for this filter.</div>
-                  ) : (
-                    <>
-                      <div className="chart">
-                        <ResponsiveContainer width="100%" height={rankingChartHeight}>
-                          <BarChart data={visibleRanking} layout="vertical" margin={{ left: 10, right: 10 }}>
-                            <XAxis type="number" tickLine={false} axisLine={false} />
-                            <YAxis
-                              type="category"
-                              dataKey="name"
-                              width={120}
-                              tickLine={false}
-                              axisLine={false}
-                              tickFormatter={(value) => shortenLabel(String(value), 15)}
-                            />
-                            <Tooltip formatter={(value) => formatChartValue(value)} />
-                            <Bar dataKey="averageScore" fill="#7c8cff" radius={[0, 8, 8, 0]} />
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                      {filteredRanking.length > TEAM_RANKING_PAGE_SIZE && (
-                        <div className="table-pagination">
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            onClick={() => setRankingPage((current) => Math.max(1, current - 1))}
-                            disabled={currentRankingPage === 1}
-                          >
-                            Previous
-                          </button>
-                          <span className="panel-sub">
-                              Page {currentRankingPage} of {totalRankingPages}
-                            </span>
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            onClick={() => setRankingPage((current) => Math.min(totalRankingPages, current + 1))}
-                            disabled={currentRankingPage === totalRankingPages}
-                          >
-                            Next
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
+              <div className="panel chart-card">
+                <div className="panel-header">
+                  <h4>Team Metric Trend</h4>
+                  <span className="panel-sub">
+                    {selectedTeamMetric
+                      ? `${selectedTeamMetric.label} · ${selectedTeamMetricGoal?.name ?? "Metric"}`
+                      : "Select a metric to view the team trend"}
+                  </span>
                 </div>
-
-                <div className="chart-card panel">
-                  <div className="panel-header">
-                    <h4>Team Trend</h4>
-                    <span className="panel-sub">Average KPI across all visible periods</span>
-                  </div>
-                  <div className="chart">
-                    <ResponsiveContainer width="100%" height={teamTrendChartHeight}>
-                      <LineChart data={teamAnalytics.trend}>
-                        <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={24} />
+                <div className="form-grid team-filter-grid">
+                  <label className="form-field">
+                    <span>Parent Goal</span>
+                    <select
+                      value={selectedTeamMetricGoal?.goalId ?? ""}
+                      onChange={(event) => setTeamMetricGoalId(event.target.value)}
+                      disabled={teamMetricGoals.length === 0}
+                    >
+                      {teamMetricGoals.map((goal) => (
+                        <option key={`team-metric-goal-${goal.goalId}`} value={goal.goalId}>
+                          {goal.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="form-field">
+                    <span>Metric</span>
+                    <select
+                      value={selectedTeamMetric?.metricId ?? ""}
+                      onChange={(event) => setTeamMetricId(event.target.value)}
+                      disabled={!selectedTeamMetricGoal || selectedTeamMetricGoal.metrics.length === 0}
+                    >
+                      {(selectedTeamMetricGoal?.metrics ?? []).map((metric) => (
+                        <option key={`team-metric-${metric.metricId}`} value={metric.metricId}>
+                          {metric.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="chart">
+                  {teamMetricGoals.length === 0 ? (
+                    <div className="empty-state">No team metrics available.</div>
+                  ) : !selectedTeamMetric ? (
+                    <div className="empty-state">Select a metric to view the team trend.</div>
+                  ) : isDateRangeInvalid ? (
+                    <div className="empty-state">Select a valid date range to load metrics.</div>
+                  ) : teamMetricTrendLoading ? (
+                    <div className="empty-state">Loading team metric trend...</div>
+                  ) : teamMetricTrendError ? (
+                    <div className="empty-state">Unable to load team metric trend.</div>
+                  ) : displayTeamMetricTrendPoints.length === 0 ? (
+                    <div className="empty-state">No metric trend data available.</div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={240}>
+                      <LineChart data={displayTeamMetricTrendPoints}>
+                        <XAxis
+                          dataKey="date"
+                          tickLine={false}
+                          axisLine={false}
+                          minTickGap={24}
+                          tickFormatter={formatTrendDateLabel}
+                        />
                         <YAxis tickLine={false} axisLine={false} />
-                        <Tooltip formatter={(value) => formatChartValue(value)} />
-                        <Line type="monotone" dataKey="averageScore" stroke="#6bf0a1" strokeWidth={3} dot={false} />
+                        <Tooltip
+                          labelFormatter={(label) => formatTrendDateLabel(String(label ?? ""))}
+                          formatter={(value) => {
+                            const parsed = typeof value === "number" ? value : Number(value);
+                            if (!Number.isFinite(parsed)) return String(value ?? "");
+                            const type = teamMetricTrend?.metric.type ?? "NUMBER";
+                            return formatMetricAverage(parsed, type);
+                          }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="value"
+                          stroke="#6bf0a1"
+                          strokeWidth={3}
+                          connectNulls={false}
+                          dot={{ r: 3 }}
+                        />
                       </LineChart>
                     </ResponsiveContainer>
-                  </div>
+                  )}
                 </div>
+                {teamMetricTrend && teamMetricTrend.metric && selectedTeamMetric && (
+                  <div className="metric-trend-summary">
+                    <div className="metric-summary-item">
+                      <div className="metric-summary-label">Latest</div>
+                      <div className="metric-summary-value">
+                        {teamMetricLatestValue === null
+                          ? "--"
+                          : formatMetricAverage(teamMetricLatestValue, teamMetricTrend.metric.type)}
+                      </div>
+                    </div>
+                    <div className="metric-summary-item">
+                      <div className="metric-summary-label">Target</div>
+                      <div className="metric-summary-value">{teamMetricTrend.metric.targetText ?? "--"}</div>
+                    </div>
+                    <div className="metric-summary-item">
+                      <div className="metric-summary-label">Range</div>
+                      <div className="metric-summary-value">{activeDateRangeLabel}</div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {selectedMemberId && (
                 <div className="panel analytics-member-panel">
                   <div className="panel-header">
-                    <h4>Focused User Progress</h4>
+                    <h4>{isAllTeamMembersView ? "Team Progress Snapshot" : "Focused User Progress"}</h4>
                     {teamMemberAnalytics?.user ? (
                       <span className="panel-sub">
-                        {teamMemberAnalytics.user.name} ({teamMemberAnalytics.user.role})
+                        {isAllTeamMembersView
+                          ? `${teamMemberAnalytics.user.name} (combined totals and computed metrics)`
+                          : `${teamMemberAnalytics.user.name} (${teamMemberAnalytics.user.role})`}
                       </span>
                     ) : (
                       <span className="panel-sub">Member details</span>
@@ -559,195 +791,160 @@ export default function AnalyticsPage() {
                   ) : (
                     <div className="analytics-member-content">
                       <div className="table-actions">
-                        <span className="panel-sub">{teamMemberAnalytics.user.email}</span>
-                        <Link className="btn btn-ghost" to={`/team?userId=${encodeURIComponent(teamMemberAnalytics.user.id)}`}>
-                          View submissions
+                        <span className="panel-sub">
+                          {isAllTeamMembersView ? activeDateRangeLabel : teamMemberAnalytics.user.email}
+                        </span>
+                        <Link
+                          className="btn btn-ghost"
+                          to={
+                            isAllTeamMembersView
+                              ? "/team"
+                              : `/team?userId=${encodeURIComponent(teamMemberAnalytics.user.id)}`
+                          }
+                        >
+                          {isAllTeamMembersView ? "View team submissions" : "View submissions"}
                         </Link>
                       </div>
-                      {showGoalProgressSection && (
-                        <div className="analytics-goal-card">
-                          <div className="panel-header">
-                            <h4>Personal Goal Progress</h4>
-                            <span className="panel-sub">Average score by goal</span>
-                          </div>
-                          <div className="progress-stack">
-                            {memberGoalOverallProgress !== null && (
-                              <div className="progress-row overall">
-                                <div className="progress-label">Overall Score</div>
-                                <div className="progress-bar">
-                                  <div className="progress-fill" style={{ width: `${memberGoalOverallProgress}%` }} />
-                                </div>
-                                <div className="progress-value">{memberGoalOverallProgress.toFixed(0)}%</div>
-                              </div>
-                            )}
-                            {compactMemberGoalProgress.map((goal, index) => (
-                              <div key={goal.goalId} className="progress-row">
-                                <div className="progress-label">{shortenLabel(goal.name, 26)}</div>
-                                <div className="progress-bar">
-                                  <div
-                                    className="progress-fill"
-                                    style={{
-                                      width: `${goal.progress}%`,
-                                      background: GOAL_COLORS[index % GOAL_COLORS.length],
-                                    }}
-                                  />
-                                </div>
-                                <div className="progress-value">{goal.progress.toFixed(0)}%</div>
-                              </div>
-                            ))}
-                          </div>
+                      {memberMetricSnapshotRows.length === 0 ? (
+                        <div className="empty-state">
+                          {isAllTeamMembersView
+                            ? "No metrics available for the current team selection."
+                            : "No metrics available for this user."}
                         </div>
-                      )}
-                      {compactMemberGoalProgress.length > 0 && (
-                        <div className="analytics-insight-grid">
-                          <div className="analytics-insight-card">
-                            <div className="panel-header">
-                              <h4>Top Strengths</h4>
-                              <span className="panel-sub">Ranked by highest goal progress</span>
-                            </div>
-                            <div className="analytics-insight-list">
-                              {topGoalStrengths.length === 0 ? (
-                                <div className="empty-state">No strength goals in this range.</div>
-                              ) : (
-                                topGoalStrengths.map((goal) => (
-                                  <div key={`top-${goal.goalId}`} className="analytics-insight-item">
-                                    <div className="analytics-insight-title">{goal.name}</div>
-                                    <div className="analytics-insight-meta">
-                                      Avg {goal.averageScore.toFixed(2)} | {goal.progress.toFixed(0)}% |{" "}
-                                      {goalPerformanceBand(goal.progress)}
-                                    </div>
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          </div>
-                          <div className="analytics-insight-card">
-                            <div className="panel-header">
-                              <h4>Needs Improvement</h4>
-                              <span className="panel-sub">Goals at or below 60% progress</span>
-                            </div>
-                            <div className="analytics-insight-list">
-                              {focusGoalAreas.length === 0 ? (
-                                <div className="empty-state">No goals need improvement in this range.</div>
-                              ) : (
-                                focusGoalAreas.map((goal) => (
-                                  <div key={`focus-${goal.goalId}`} className="analytics-insight-item">
-                                    <div className="analytics-insight-title">{goal.name}</div>
-                                    <div className="analytics-insight-meta">
-                                      Avg {goal.averageScore.toFixed(2)} | {goal.progress.toFixed(0)}% |{" "}
-                                      {goalPerformanceBand(goal.progress)}
-                                    </div>
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                      {metricGoalProgress.length > 0 && (
+                      ) : (
                         <div className="analytics-goal-detail-card">
                           <div className="panel-header">
-                            <h4>Child Goal Metrics</h4>
-                            <span className="panel-sub">Metric-level view for the selected parent goal</span>
+                            <h4>Metric Snapshot</h4>
+                            <span className="panel-sub">
+                              {isAllTeamMembersView
+                                ? `Combined team totals and computed metrics across: ${activeDateRangeLabel}`
+                                : `Snapshot across the active range: ${activeDateRangeLabel}`}
+                            </span>
                           </div>
-                          <div className="form-grid team-filter-grid">
-                            <label className="form-field">
-                              <span>Parent Goal</span>
-                              <select
-                                value={selectedMetricGoal?.goalId ?? ""}
-                                onChange={(event) => setSelectedMetricGoalId(event.target.value)}
-                              >
-                                {metricGoalProgress.map((goal) => (
-                                  <option key={`metric-goal-${goal.goalId}`} value={goal.goalId}>
-                                    {goal.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-                          {selectedMetricGoal ? (
-                            <div className="analytics-goal-detail-table">
-                              <div className="analytics-goal-detail-row analytics-goal-detail-row-header">
-                                <div>Child Goal</div>
-                                <div>Average</div>
-                                <div>Months</div>
-                              </div>
-                              {selectedMetricGoal.metrics.map((metric) => (
-                                <div
-                                  key={`metric-detail-${selectedMetricGoal.goalId}-${metric.metricId}`}
-                                  className="analytics-goal-detail-row"
-                                >
-                                  <div title={metric.label}>{shortenLabel(metric.label, 36)}</div>
-                                  <div>{formatMetricAverage(metric.averageValue, metric.type)}</div>
-                                  <div>{metric.submissions}</div>
-                                </div>
-                              ))}
+                          <div className="analytics-goal-detail-table">
+                            <div className="analytics-goal-detail-row analytics-goal-detail-row-header metric-snapshot-row">
+                              <div>Metric</div>
+                              <div>Value</div>
+                              <div>Target</div>
+                              <div>Rate</div>
                             </div>
-                          ) : (
-                            <div className="empty-state">No child metrics available for this goal.</div>
-                          )}
+                            {memberMetricSnapshotRows.map((row) => {
+                              const progress = getMetricProgressPercent(row.averageValue, row.type);
+                              const rateValue = progress === null ? formatMetricAverage(row.averageValue, row.type) : null;
+                              const rateText = progress === null ? rateValue : `${progress.toFixed(2)}%`;
+                              const displayRateText = rateText ?? "--";
+                              const isRateMuted = displayRateText === "--";
+                              const targetRange = parseTargetRange(row.targetText ?? null, row.type);
+                              const targetStatus = getTargetStatus(row.averageValue, targetRange);
+                              const thresholdStatus = getThresholdStatus(row.key, row.averageValue);
+                              const visualStatus = thresholdStatus ?? targetStatus;
+                              const statusClass =
+                                visualStatus === "in" ? "is-in-range" : visualStatus === "out" ? "is-out-range" : "";
+                              const issueTickets = metricIssueTicketsByKey.get(row.key) ?? [];
+                              const isReworkMetric = isReworkMetricKey(row.key);
+                              const isAdditionalInitiativesMetric = isAdditionalInitiativesMetricKey(row.key);
+                              const canShowIssues =
+                                targetStatus === "out" ||
+                                (isReworkMetric && issueTickets.length > 0) ||
+                                (isAdditionalInitiativesMetric && issueTickets.length > 0);
+                              const isExpanded = expandedSnapshotKeys.has(row.key);
+
+                              return (
+                                <Fragment key={`metric-snapshot-${row.goalId}-${row.metricId}`}>
+                                  <div className={`analytics-goal-detail-row metric-snapshot-row ${statusClass}`}>
+                                    <div className="metric-snapshot-label">
+                                      <div className="metric-title-row">
+                                        <span className="metric-title">{row.label}</span>
+                                      </div>
+                                      <div className="metric-sub">{row.goalName}</div>
+                                    </div>
+                                    <div className="metric-snapshot-value">
+                                      <div className="metric-primary">
+                                        {formatMetricAverage(row.averageValue, row.type)}
+                                      </div>
+                                      <div className="metric-sub">
+                                        {isAllTeamMembersView ? `Combined team value | ${activeDateRangeLabel}` : activeDateRangeLabel}
+                                      </div>
+                                    </div>
+                                    <div className="metric-snapshot-target">{row.targetText ?? "--"}</div>
+                                    <div className="metric-snapshot-progress">
+                                      <div className="metric-rate-wrap">
+                                        <span className={isRateMuted ? "metric-summary-muted" : "metric-rate-value"}>
+                                          {displayRateText}
+                                        </span>
+                                        {canShowIssues && (
+                                          <button
+                                            type="button"
+                                            className={`metric-issue-toggle ${isExpanded ? "is-open" : ""}`}
+                                            onClick={() => toggleSnapshotDetails(row.key)}
+                                            title={isExpanded ? "Hide tickets" : "View tickets"}
+                                            aria-label={isExpanded ? "Hide tickets" : "View tickets"}
+                                          >
+                                            <svg viewBox="0 0 20 20" aria-hidden="true" className="metric-issue-icon">
+                                              <path
+                                                d="M3.5 6.5h13v7a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7Zm2-3h9a2 2 0 0 1 2 2v1h-13v-1a2 2 0 0 1 2-2Zm2 7h5"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                strokeWidth="1.4"
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                              />
+                                            </svg>
+                                            <svg
+                                              viewBox="0 0 20 20"
+                                              aria-hidden="true"
+                                              className={`metric-issue-chevron ${isExpanded ? "is-open" : ""}`}
+                                            >
+                                              <path
+                                                d="M6 8.5 10 12.5 14 8.5"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                strokeWidth="1.6"
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                              />
+                                            </svg>
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  {canShowIssues && isExpanded && (
+                                    <div className="analytics-goal-detail-row metric-snapshot-details">
+                                      <div className="metric-snapshot-detail">
+                                        <span className="metric-snapshot-detail-label">Tickets:</span>
+                                        {issueTickets.length === 0 ? (
+                                          <span className="metric-snapshot-empty">No ticket details available.</span>
+                                        ) : (
+                                          <div className="metric-snapshot-ticket-list">
+                                            {issueTickets.map((ticket) =>
+                                              ticket.link ? (
+                                                <a
+                                                  key={`${row.key}-${ticket.id}`}
+                                                  href={ticket.link}
+                                                  target="_blank"
+                                                  rel="noreferrer"
+                                                  className="metric-ticket-link"
+                                                >
+                                                  {ticket.id}
+                                                </a>
+                                              ) : (
+                                                <span key={`${row.key}-${ticket.id}`} className="metric-ticket-text">
+                                                  {ticket.id}
+                                                </span>
+                                              )
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
+                                </Fragment>
+                              );
+                            })}
+                          </div>
                         </div>
                       )}
-                      <div className="analytics-member-stats">
-                        <div className="stat-card">
-                          <div className="stat-label">Latest KPI</div>
-                          <div className="stat-value">{teamMemberAnalytics.summary.lastScore.toFixed(2)}</div>
-                          <div className="stat-sub">Most recent score</div>
-                        </div>
-                        <div className="stat-card">
-                          <div className="stat-label">Delta</div>
-                          <div className="stat-value">
-                            {teamMemberAnalytics.summary.delta >= 0 ? "+" : ""}
-                            {teamMemberAnalytics.summary.delta.toFixed(2)}
-                          </div>
-                          <div className="stat-sub">Change vs previous period</div>
-                        </div>
-                        <div className="stat-card">
-                          <div className="stat-label">Total Entries</div>
-                          <div className="stat-value">{teamMemberAnalytics.summary.total}</div>
-                          <div className="stat-sub">Submissions tracked</div>
-                        </div>
-                      </div>
-                      <div className="chart-grid">
-                        <div className="panel chart-card">
-                          <div className="panel-header">
-                            <h4>User Trend</h4>
-                            <span className="panel-sub">Raw score timeline</span>
-                          </div>
-                          <div className="chart">
-                            <ResponsiveContainer width="100%" height={260}>
-                              <AreaChart data={teamMemberAnalytics.points}>
-                                <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={24} />
-                                <YAxis tickLine={false} axisLine={false} />
-                                <Tooltip formatter={(value) => formatChartValue(value)} />
-                                <Area
-                                  type="monotone"
-                                  dataKey="score"
-                                  stroke="#f29d38"
-                                  fill="rgba(242, 157, 56, 0.25)"
-                                />
-                                <Line type="monotone" dataKey="score" stroke="#f29d38" strokeWidth={2} dot={false} />
-                              </AreaChart>
-                            </ResponsiveContainer>
-                          </div>
-                        </div>
-                        <div className="panel chart-card">
-                          <div className="panel-header">
-                            <h4>User Rolling Average</h4>
-                            <span className="panel-sub">3-period smoothing</span>
-                          </div>
-                          <div className="chart">
-                            <ResponsiveContainer width="100%" height={260}>
-                              <LineChart data={teamMemberAnalytics.rollingAverage}>
-                                <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={24} />
-                                <YAxis tickLine={false} axisLine={false} />
-                                <Tooltip formatter={(value) => formatChartValue(value)} />
-                                <Line type="monotone" dataKey="value" stroke="#44d9e6" strokeWidth={3} dot={false} />
-                              </LineChart>
-                            </ResponsiveContainer>
-                          </div>
-                        </div>
-                      </div>
                     </div>
                   )}
                 </div>

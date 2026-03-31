@@ -11,6 +11,7 @@ type ScoreInput = {
   formula?: string | null;
   metrics: KpiMetric[];
   values: MetricValueInput[];
+  strict?: boolean;
 };
 
 type GoalInput = {
@@ -59,6 +60,7 @@ function evaluateFormula(formula: string, variables: Record<string, number>): nu
 
 export function computeScore(input: ScoreInput): number | null {
   const { formula, metrics, values } = input;
+  const strict = input.strict !== false;
   const hasFormula = Boolean(formula && formula.trim().length > 0);
 
   if (metrics.length === 0) return null;
@@ -68,6 +70,7 @@ export function computeScore(input: ScoreInput): number | null {
   const numericValues: number[] = [];
   const computedMetrics = metrics.filter((metric) => metric.isComputed);
   const allowZeroDefaults = hasFormula || computedMetrics.length > 0;
+  let missingRequired = false;
 
   for (const metric of metrics) {
     if (metric.isComputed) {
@@ -76,7 +79,14 @@ export function computeScore(input: ScoreInput): number | null {
     const rawValue = valueMap.get(metric.id);
 
     if (metric.required && (rawValue === null || rawValue === undefined)) {
-      throw new AppError(`Missing value for metric ${metric.key}`, 400, "MISSING_METRIC");
+      if (strict) {
+        throw new AppError(`Missing value for metric ${metric.key}`, 400, "MISSING_METRIC");
+      }
+      missingRequired = true;
+      if (allowZeroDefaults) {
+        variables[metric.key] = 0;
+      }
+      continue;
     }
 
     if (rawValue === null || rawValue === undefined) {
@@ -95,11 +105,15 @@ export function computeScore(input: ScoreInput): number | null {
       metric.min !== undefined &&
       rawValue < metric.min
     ) {
-      throw new AppError(`Value below minimum for ${metric.key}`, 400, "METRIC_MIN");
+      if (strict) {
+        throw new AppError(`Value below minimum for ${metric.key}`, 400, "METRIC_MIN");
+      }
     }
 
     if (metric.max !== null && metric.max !== undefined && rawValue > metric.max) {
-      throw new AppError(`Value above maximum for ${metric.key}`, 400, "METRIC_MAX");
+      if (strict) {
+        throw new AppError(`Value above maximum for ${metric.key}`, 400, "METRIC_MAX");
+      }
     }
 
     variables[metric.key] = rawValue;
@@ -118,6 +132,10 @@ export function computeScore(input: ScoreInput): number | null {
     }
     variables[metric.key] = finalValue;
     numericValues.push(finalValue);
+  }
+
+  if (missingRequired && !strict) {
+    return null;
   }
 
   if (hasFormula) {
@@ -146,7 +164,11 @@ export function computeScore(input: ScoreInput): number | null {
   return sum / numericValues.length;
 }
 
-export function computeGoalScores(goals: GoalInput[], values: MetricValueInput[]) {
+export function computeGoalScores(
+  goals: GoalInput[],
+  values: MetricValueInput[],
+  options?: { strict?: boolean }
+) {
   const goalScores: GoalScore[] = goals.map((goal) => ({
     goalId: goal.id,
     key: goal.key,
@@ -156,6 +178,7 @@ export function computeGoalScores(goals: GoalInput[], values: MetricValueInput[]
       formula: goal.formula,
       metrics: goal.metrics,
       values,
+      strict: options?.strict,
     }),
   }));
 
@@ -166,8 +189,9 @@ export function computeOverallScore(input: {
   goals: GoalInput[];
   values: MetricValueInput[];
   overallFormula?: string | null;
+  strict?: boolean;
 }) {
-  const goalScores = computeGoalScores(input.goals, input.values);
+  const goalScores = computeGoalScores(input.goals, input.values, { strict: input.strict });
   const validScores = goalScores.filter((goal) => goal.score !== null && goal.score !== undefined);
 
   if (input.overallFormula && input.overallFormula.trim().length > 0) {
