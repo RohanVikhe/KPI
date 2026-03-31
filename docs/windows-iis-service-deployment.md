@@ -9,7 +9,7 @@ Recommended production setup on a Windows RDP server:
 
 - IIS serves the React build over HTTPS
 - IIS reverse proxies `/api` and `/health` to the Node backend
-- Node backend runs as a Windows Service with NSSM
+- Node backend runs as a Windows Service with WinSW
 
 ## 1. Server Prerequisites
 
@@ -19,7 +19,7 @@ Install these on the Windows server:
 - IIS
 - IIS URL Rewrite
 - IIS Application Request Routing (ARR)
-- NSSM
+- WinSW
 - MySQL or access to your production MySQL database
 
 Enable ARR proxy:
@@ -97,8 +97,20 @@ Default assumptions in that script:
 
 - repo path is `D:\KPI\server`
 - Node is at `C:\Program Files\nodejs\node.exe`
-- NSSM is at `C:\tools\nssm\nssm.exe`
+- WinSW wrapper exe is at `D:\KPI\server\deploy\KPI-API.exe`
 - service name is `KPI-API`
+
+Before running the script:
+
+1. Download the WinSW executable on the server
+2. Rename it to `KPI-API.exe`
+3. Place it in `D:\KPI\server\deploy`
+
+Why this is needed:
+
+- Windows cannot run `node dist\index.js` directly as a proper service by itself
+- you need a service wrapper such as WinSW
+- this approach avoids NSSM and still gives you a real Windows Service
 
 Run:
 
@@ -112,7 +124,8 @@ What it does:
 - checks for `dist\index.js`
 - checks for `.env.production`
 - creates `server\logs`
-- installs or updates the `KPI-API` service
+- writes a WinSW XML config next to `KPI-API.exe`
+- installs or updates the `KPI-API` service through WinSW
 - points the service to `node dist\index.js`
 - loads env through `DOTENV_CONFIG_PATH`
 - enables auto-start
