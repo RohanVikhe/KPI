@@ -31,9 +31,9 @@ async function main() {
     return;
   }
 
-  const template = templates[0];
-  const desiredGoalKeys = new Set(defaultTemplate.goals.map((goal) => goal.key));
-  const desiredMetricKeys = new Set(
+const template = templates[0];
+  const desiredGoalKeys = new Set<string>(defaultTemplate.goals.map((goal) => goal.key));
+  const desiredMetricKeys = new Set<string>(
     defaultTemplate.goals.flatMap((goal) => goal.metrics.map((metric) => metric.key))
   );
 

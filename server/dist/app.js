@@ -12,6 +12,7 @@ app.use(helmet());
 app.use(cors({
     origin: allowedOrigins,
     credentials: true,
+    exposedHeaders: ["Content-Disposition"],
 }));
 app.use(express.json({ limit: "1mb" }));
 app.use(pinoHttp());

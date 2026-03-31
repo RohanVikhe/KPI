@@ -7,7 +7,6 @@ const envSchema = z.object({
     JWT_SECRET: z.string().min(32),
     JWT_EXPIRES_IN: z.string().default("1d"),
     CORS_ORIGIN: z.string().default("http://localhost:5173"),
-    REPORTS_DIR: z.string().default("reports"),
 });
 const parsed = envSchema.safeParse(process.env);
 if (!parsed.success) {

@@ -17,6 +17,9 @@ export async function submitReview(input) {
     if (!submission) {
         throw new AppError("Submission not found", 404, "SUBMISSION_NOT_FOUND");
     }
+    if (submission.userId === input.reviewerId) {
+        throw new AppError("You cannot review your own KPI submission", 403, "SELF_REVIEW_FORBIDDEN");
+    }
     assertSubmissionReviewAccess({
         requesterId: input.reviewerId,
         requesterRole: input.reviewerRole,
@@ -41,7 +44,7 @@ export async function submitReview(input) {
                 reviewedAt: new Date(),
             },
             include: {
-                template: { include: { metrics: { orderBy: { order: "asc" } } } },
+                template: { include: { goals: { orderBy: { order: "asc" }, include: { metrics: { orderBy: { order: "asc" } } } } } },
                 values: true,
                 user: { select: { id: true, name: true, email: true, role: true, managerId: true } },
                 reviews: { orderBy: { reviewedAt: "desc" } },

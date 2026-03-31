@@ -59,8 +59,6 @@ model User {
   reviews      KpiReview[]  @relation("ReviewReviewer")
   reviewedSubmissions KpiSubmission[] @relation("SubmissionReviewer")
   comments     KpiComment[]
-  auditLogs    AuditLog[]    @relation("AuditActor")
-  targetedAuditLogs AuditLog[] @relation("AuditTargetUser")
 }
 
 model UserProject {
@@ -226,4 +224,3 @@ model KpiComment {
 
   @@index([submissionId])
 }
-

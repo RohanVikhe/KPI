@@ -1,7 +1,40 @@
 import { MetricType, Role } from "@prisma/client";
 import { prisma } from "./prisma.js";
 
-export const defaultTemplate = {
+type DefaultMetricDef = {
+  key: string;
+  label: string;
+  type: MetricType;
+  required: boolean;
+  min?: number | null;
+  max?: number | null;
+  isComputed?: boolean;
+  definition?: string | null;
+  formulaText?: string | null;
+  calcFormula?: string | null;
+  targetText?: string | null;
+  frequency?: string | null;
+  weight?: number | null;
+};
+
+type DefaultGoalDef = {
+  key: string;
+  name: string;
+  description?: string | null;
+  weight?: number | null;
+  formula?: string | null;
+  metrics: DefaultMetricDef[];
+};
+
+type DefaultTemplateDef = {
+  name: string;
+  description?: string | null;
+  formula?: string | null;
+  isActive: boolean;
+  goals: DefaultGoalDef[];
+};
+
+export const defaultTemplate: DefaultTemplateDef = {
   name: "Delivery Department KPI",
   description: "Delivery Department KPI framework aligned to the 2026 delivery goals.",
   formula: "(delivery_excellence + quality_process + value_client) / 3",
@@ -356,7 +389,7 @@ export const defaultTemplate = {
       ],
     },
   ],
-} as const;
+};
 
 export async function seedDefaultTemplate(preferredCreatorId?: string) {
   const existing = await prisma.kpiTemplate.findFirst({

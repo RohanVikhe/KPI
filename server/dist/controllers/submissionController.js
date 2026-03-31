@@ -2,7 +2,7 @@ import { AppError } from "../utils/errors.js";
 import { createSubmission, getSubmissionDetails, listAllSubmissions, listMySubmissions, listTeamSubmissions, } from "../services/submissionService.js";
 import { addComment } from "../services/commentService.js";
 import { submitReview } from "../services/reviewService.js";
-import { generateSubmissionReport, listReports } from "../services/reportService.js";
+import { generateSubmissionReport } from "../services/reportService.js";
 export async function createSubmissionHandler(req, res) {
     if (!req.user) {
         throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
@@ -23,7 +23,8 @@ export async function listMySubmissionsHandler(req, res) {
     if (!req.user) {
         throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
     }
-    const submissions = await listMySubmissions(req.user.id);
+    const approvedOnly = String(req.query.approvedOnly ?? "").toLowerCase() === "true";
+    const submissions = await listMySubmissions(req.user.id, { approvedOnly });
     return res.json({ submissions });
 }
 export async function listTeamSubmissionsHandler(req, res) {
@@ -88,13 +89,10 @@ export async function generateReportHandler(req, res) {
     }
     const { id } = req.params;
     const report = await generateSubmissionReport(id, req.user.id, req.user.role);
-    return res.status(201).json({ report });
-}
-export async function listReportsHandler(req, res) {
-    if (!req.user) {
-        throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
-    }
-    const { id } = req.params;
-    const reports = await listReports(id, req.user.id, req.user.role);
-    return res.json({ reports });
+    res.setHeader("Content-Type", report.mimeType);
+    const encodedFileName = encodeURIComponent(report.fileName);
+    res.setHeader("Content-Disposition", `attachment; filename="${report.fileName}"; filename*=UTF-8''${encodedFileName}`);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Length", String(report.buffer.length));
+    return res.status(200).send(report.buffer);
 }

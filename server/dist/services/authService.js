@@ -26,11 +26,15 @@ export async function login(email, password) {
             role: user.role,
             managerId: user.managerId,
             isActive: user.isActive,
+            skills: user.skills,
         },
     };
 }
 export async function register(input) {
-    const managerId = input.managerId ?? null;
+    if (input.role === Role.ADMIN && input.managerId) {
+        throw new AppError("Admin cannot have a manager", 400, "ADMIN_MANAGER_NOT_ALLOWED");
+    }
+    const managerId = input.role === Role.ADMIN ? null : input.managerId ?? null;
     if (managerId) {
         const manager = await prisma.user.findUnique({ where: { id: managerId } });
         if (!manager) {
@@ -58,5 +62,6 @@ export async function register(input) {
         role: user.role,
         managerId: user.managerId,
         isActive: user.isActive,
+        skills: user.skills,
     };
 }

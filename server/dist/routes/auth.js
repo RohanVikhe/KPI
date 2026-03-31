@@ -13,7 +13,7 @@ const registerSchema = z.object({
     name: z.string().min(2),
     email: z.string().email(),
     password: z.string().min(8),
-    role: z.nativeEnum(Role),
+    role: z.nativeEnum(Role).optional(),
     managerId: z.string().cuid().optional().nullable(),
 });
 const bootstrapSchema = z.object({
@@ -23,6 +23,6 @@ const bootstrapSchema = z.object({
 });
 router.post("/login", validateBody(loginSchema), loginHandler);
 router.post("/bootstrap", validateBody(bootstrapSchema), bootstrapHandler);
-router.post("/register", authenticate, requireRole(Role.ADMIN), validateBody(registerSchema), registerHandler);
+router.post("/register", authenticate, requireRole(Role.ADMIN, Role.MANAGER), validateBody(registerSchema), registerHandler);
 router.get("/me", authenticate, meHandler);
 export default router;
