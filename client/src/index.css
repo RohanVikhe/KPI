@@ -1482,7 +1482,30 @@ a {
 }
 
 .analytics-goal-detail-row.metric-snapshot-row {
-  grid-template-columns: 1.6fr 0.9fr 1fr 1.2fr;
+  grid-template-columns: 1.8fr 1fr 1.1fr;
+}
+
+.metric-snapshot-group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(242, 157, 56, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.metric-snapshot-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #f6c27a;
+}
+
+.metric-snapshot-group-meta {
+  font-size: 11px;
+  color: rgba(247, 244, 239, 0.6);
 }
 
 .metric-snapshot-label {
@@ -1518,6 +1541,8 @@ a {
 }
 
 .metric-snapshot-target {
+  display: grid;
+  gap: 4px;
   font-size: 12px;
   color: rgba(247, 244, 239, 0.78);
 }
@@ -1525,13 +1550,41 @@ a {
 .metric-snapshot-progress {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .metric-rate-wrap {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   width: 100%;
+}
+
+.metric-rate-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.metric-cell-label {
+  display: none;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(247, 244, 239, 0.52);
+}
+
+.metric-cell-value {
+  line-height: 1.4;
+}
+
+.metric-snapshot-row:not(.analytics-goal-detail-row-header) {
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 0.2s ease;
+}
+
+.metric-snapshot-row:not(.analytics-goal-detail-row-header):hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .metric-rate-wrap .metric-issue-toggle {
@@ -1548,12 +1601,21 @@ a {
   color: #ff6b6b;
 }
 
+.metric-snapshot-row.is-warning .metric-progress-value,
+.metric-snapshot-row.is-warning .metric-rate-value {
+  color: #f29d38;
+}
+
 .metric-snapshot-row.is-in-range .metric-progress-fill {
   background: #6bf0a1;
 }
 
 .metric-snapshot-row.is-out-range .metric-progress-fill {
   background: #ff6b6b;
+}
+
+.metric-snapshot-row.is-warning .metric-progress-fill {
+  background: #f29d38;
 }
 
 .metric-issue-toggle {
@@ -2014,7 +2076,7 @@ a {
   }
 
   .analytics-goal-detail-row.metric-snapshot-row {
-    grid-template-columns: 1.4fr 0.9fr 0.9fr 1fr;
+    grid-template-columns: 1.5fr 1fr 1fr;
   }
 }
 
@@ -2041,5 +2103,34 @@ a {
 
   .analytics-goal-detail-row-header {
     display: none;
+  }
+
+  .metric-snapshot-group-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .metric-snapshot-row {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .metric-cell-label {
+    display: block;
+  }
+
+  .metric-snapshot-target,
+  .metric-snapshot-progress {
+    padding-top: 8px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.1);
+  }
+
+  .metric-snapshot-progress {
+    justify-content: stretch;
+  }
+
+  .metric-rate-wrap {
+    align-items: flex-start;
   }
 }

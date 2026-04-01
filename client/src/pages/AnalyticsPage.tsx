@@ -68,6 +68,20 @@ type TeamMemberAnalytics = UserAnalytics & {
 
 type GoalMetricProgressView = TeamMemberAnalytics["goalMetricProgress"][number];
 
+type MemberMetricSnapshotRow = {
+  goalId: string;
+  goalName: string;
+  goalOrder: number;
+  metricId: string;
+  key: string;
+  label: string;
+  type: "NUMBER" | "PERCENT" | "CURRENCY";
+  targetText?: string | null;
+  averageValue: number;
+  submissions: number;
+  order: number;
+};
+
 const ALL_TEAM_MEMBERS_ID = "all";
 
 function formatChartValue(value: unknown) {
@@ -166,12 +180,22 @@ type SnapshotThresholdRule = {
   value: number;
 };
 
+type SnapshotVisualStatus = MetricTargetStatus | "warning";
+
 const SNAPSHOT_THRESHOLD_BY_KEY: Record<string, SnapshotThresholdRule> = {
   additional_initiatives_delivered: { direction: "min", value: 1 },
   vc_additional_initiatives: { direction: "min", value: 1 },
   delivery_error_rework_rate: { direction: "max", value: 5 },
   qp_rework_count: { direction: "max", value: 5 },
 };
+
+const TEMPORARY_ZERO_WARNING_METRIC_KEYS = new Set([
+  "schedule_adherence",
+  "scope_change_control",
+  "process_compliance_rate",
+  "change_management_adherence",
+  "automation_adoption",
+]);
 
 function parseTargetRange(
   targetText?: string | null,
@@ -269,6 +293,30 @@ function getThresholdStatus(metricKey: string, value: number | null | undefined)
     return value < rule.value ? "out" : "in";
   }
   return value > rule.value ? "out" : "in";
+}
+
+function getSnapshotVisualStatus(
+  metricKey: string,
+  value: number | null | undefined,
+  baseStatus: MetricTargetStatus | null | undefined
+): SnapshotVisualStatus {
+  if (
+    value !== null &&
+    value !== undefined &&
+    !Number.isNaN(value) &&
+    value === 0 &&
+    TEMPORARY_ZERO_WARNING_METRIC_KEYS.has(metricKey)
+  ) {
+    return "warning";
+  }
+  return baseStatus ?? "unknown";
+}
+
+function getSnapshotStatusClass(status: SnapshotVisualStatus) {
+  if (status === "in") return "is-in-range";
+  if (status === "out") return "is-out-range";
+  if (status === "warning") return "is-warning";
+  return "";
 }
 
 function isReworkMetricKey(metricKey: string) {
@@ -390,7 +438,7 @@ export default function AnalyticsPage() {
         return a.name.localeCompare(b.name);
       });
   }, [memberGoalMetricProgress]);
-  const memberMetricSnapshotRows = useMemo(() => {
+  const memberMetricSnapshotRows = useMemo<MemberMetricSnapshotRow[]>(() => {
     return metricGoalProgress.flatMap((goal) => {
       const sortedMetrics = goal.metrics.slice().sort((a, b) => {
         if (a.order !== b.order) return a.order - b.order;
@@ -411,6 +459,27 @@ export default function AnalyticsPage() {
       }));
     });
   }, [metricGoalProgress]);
+  const memberMetricSnapshotGroups = useMemo(
+    () =>
+      memberMetricSnapshotRows.reduce<Array<{ goalId: string; goalName: string; rows: MemberMetricSnapshotRow[] }>>(
+        (groups, row) => {
+          const currentGroup = groups[groups.length - 1];
+          if (currentGroup && currentGroup.goalId === row.goalId) {
+            currentGroup.rows.push(row);
+            return groups;
+          }
+
+          groups.push({
+            goalId: row.goalId,
+            goalName: row.goalName,
+            rows: [row],
+          });
+          return groups;
+        },
+        []
+      ),
+    [memberMetricSnapshotRows]
+  );
   const metricIssueTicketsByKey = useMemo(() => {
     const entries = teamMemberAnalytics?.issueTicketsByMetricKey ?? {};
     return new Map<string, IssueTicket[]>(Object.entries(entries));
@@ -824,124 +893,137 @@ export default function AnalyticsPage() {
                           <div className="analytics-goal-detail-table">
                             <div className="analytics-goal-detail-row analytics-goal-detail-row-header metric-snapshot-row">
                               <div>Metric</div>
-                              <div>Value</div>
                               <div>Target</div>
                               <div>Rate</div>
                             </div>
-                            {memberMetricSnapshotRows.map((row) => {
-                              const progress = getMetricProgressPercent(row.averageValue, row.type);
-                              const rateValue = progress === null ? formatMetricAverage(row.averageValue, row.type) : null;
-                              const rateText = progress === null ? rateValue : `${progress.toFixed(2)}%`;
-                              const displayRateText = rateText ?? "--";
-                              const isRateMuted = displayRateText === "--";
-                              const targetRange = parseTargetRange(row.targetText ?? null, row.type);
-                              const targetStatus = getTargetStatus(row.averageValue, targetRange);
-                              const thresholdStatus = getThresholdStatus(row.key, row.averageValue);
-                              const visualStatus = thresholdStatus ?? targetStatus;
-                              const statusClass =
-                                visualStatus === "in" ? "is-in-range" : visualStatus === "out" ? "is-out-range" : "";
-                              const issueTickets = metricIssueTicketsByKey.get(row.key) ?? [];
-                              const isReworkMetric = isReworkMetricKey(row.key);
-                              const isAdditionalInitiativesMetric = isAdditionalInitiativesMetricKey(row.key);
-                              const canShowIssues =
-                                targetStatus === "out" ||
-                                (isReworkMetric && issueTickets.length > 0) ||
-                                (isAdditionalInitiativesMetric && issueTickets.length > 0);
-                              const isExpanded = expandedSnapshotKeys.has(row.key);
+                            {memberMetricSnapshotGroups.map((group) => (
+                              <Fragment key={`metric-snapshot-group-${group.goalId}`}>
+                                <div className="metric-snapshot-group-header">
+                                  <span className="metric-snapshot-group-title">{group.goalName}</span>
+                                  <span className="metric-snapshot-group-meta">
+                                    {group.rows.length} {group.rows.length === 1 ? "metric" : "metrics"}
+                                  </span>
+                                </div>
+                                {group.rows.map((row) => {
+                                  const progress = getMetricProgressPercent(row.averageValue, row.type);
+                                  const rateValue =
+                                    progress === null ? formatMetricAverage(row.averageValue, row.type) : null;
+                                  const rateText = progress === null ? rateValue : `${progress.toFixed(2)}%`;
+                                  const displayRateText = rateText ?? "--";
+                                  const isRateMuted = displayRateText === "--";
+                                  const targetRange = parseTargetRange(row.targetText ?? null, row.type);
+                                  const targetStatus = getTargetStatus(row.averageValue, targetRange);
+                                  const thresholdStatus = getThresholdStatus(row.key, row.averageValue);
+                                  const visualStatus = getSnapshotVisualStatus(
+                                    row.key,
+                                    row.averageValue,
+                                    thresholdStatus ?? targetStatus
+                                  );
+                                  const statusClass = getSnapshotStatusClass(visualStatus);
+                                  const issueTickets = metricIssueTicketsByKey.get(row.key) ?? [];
+                                  const isReworkMetric = isReworkMetricKey(row.key);
+                                  const isAdditionalInitiativesMetric = isAdditionalInitiativesMetricKey(row.key);
+                                  const canShowIssues =
+                                    visualStatus !== "warning" &&
+                                    (targetStatus === "out" ||
+                                      (isReworkMetric && issueTickets.length > 0) ||
+                                      (isAdditionalInitiativesMetric && issueTickets.length > 0));
+                                  const isExpanded = expandedSnapshotKeys.has(row.key);
 
-                              return (
-                                <Fragment key={`metric-snapshot-${row.goalId}-${row.metricId}`}>
-                                  <div className={`analytics-goal-detail-row metric-snapshot-row ${statusClass}`}>
-                                    <div className="metric-snapshot-label">
-                                      <div className="metric-title-row">
-                                        <span className="metric-title">{row.label}</span>
-                                      </div>
-                                      <div className="metric-sub">{row.goalName}</div>
-                                    </div>
-                                    <div className="metric-snapshot-value">
-                                      <div className="metric-primary">
-                                        {formatMetricAverage(row.averageValue, row.type)}
-                                      </div>
-                                      <div className="metric-sub">
-                                        {isAllTeamMembersView ? `Combined team value | ${activeDateRangeLabel}` : activeDateRangeLabel}
-                                      </div>
-                                    </div>
-                                    <div className="metric-snapshot-target">{row.targetText ?? "--"}</div>
-                                    <div className="metric-snapshot-progress">
-                                      <div className="metric-rate-wrap">
-                                        <span className={isRateMuted ? "metric-summary-muted" : "metric-rate-value"}>
-                                          {displayRateText}
-                                        </span>
-                                        {canShowIssues && (
-                                          <button
-                                            type="button"
-                                            className={`metric-issue-toggle ${isExpanded ? "is-open" : ""}`}
-                                            onClick={() => toggleSnapshotDetails(row.key)}
-                                            title={isExpanded ? "Hide tickets" : "View tickets"}
-                                            aria-label={isExpanded ? "Hide tickets" : "View tickets"}
-                                          >
-                                            <svg viewBox="0 0 20 20" aria-hidden="true" className="metric-issue-icon">
-                                              <path
-                                                d="M3.5 6.5h13v7a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7Zm2-3h9a2 2 0 0 1 2 2v1h-13v-1a2 2 0 0 1 2-2Zm2 7h5"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                strokeWidth="1.4"
-                                                strokeLinecap="round"
-                                                strokeLinejoin="round"
-                                              />
-                                            </svg>
-                                            <svg
-                                              viewBox="0 0 20 20"
-                                              aria-hidden="true"
-                                              className={`metric-issue-chevron ${isExpanded ? "is-open" : ""}`}
-                                            >
-                                              <path
-                                                d="M6 8.5 10 12.5 14 8.5"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                strokeWidth="1.6"
-                                                strokeLinecap="round"
-                                                strokeLinejoin="round"
-                                              />
-                                            </svg>
-                                          </button>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </div>
-                                  {canShowIssues && isExpanded && (
-                                    <div className="analytics-goal-detail-row metric-snapshot-details">
-                                      <div className="metric-snapshot-detail">
-                                        <span className="metric-snapshot-detail-label">Tickets:</span>
-                                        {issueTickets.length === 0 ? (
-                                          <span className="metric-snapshot-empty">No ticket details available.</span>
-                                        ) : (
-                                          <div className="metric-snapshot-ticket-list">
-                                            {issueTickets.map((ticket) =>
-                                              ticket.link ? (
-                                                <a
-                                                  key={`${row.key}-${ticket.id}`}
-                                                  href={ticket.link}
-                                                  target="_blank"
-                                                  rel="noreferrer"
-                                                  className="metric-ticket-link"
+                                  return (
+                                    <Fragment key={`metric-snapshot-${row.goalId}-${row.metricId}`}>
+                                      <div className={`analytics-goal-detail-row metric-snapshot-row ${statusClass}`}>
+                                        <div className="metric-snapshot-label">
+                                          <div className="metric-title-row">
+                                            <span className="metric-title">{row.label}</span>
+                                          </div>
+                                        </div>
+                                        <div className="metric-snapshot-target">
+                                          <span className="metric-cell-label">Target</span>
+                                          <span className="metric-cell-value">{row.targetText ?? "--"}</span>
+                                        </div>
+                                        <div className="metric-snapshot-progress">
+                                          <div className="metric-rate-wrap">
+                                            <div className="metric-rate-copy">
+                                              <span className="metric-cell-label">Rate</span>
+                                              <span
+                                                className={isRateMuted ? "metric-summary-muted" : "metric-rate-value"}
+                                              >
+                                                {displayRateText}
+                                              </span>
+                                            </div>
+                                            {canShowIssues && (
+                                              <button
+                                                type="button"
+                                                className={`metric-issue-toggle ${isExpanded ? "is-open" : ""}`}
+                                                onClick={() => toggleSnapshotDetails(row.key)}
+                                                title={isExpanded ? "Hide tickets" : "View tickets"}
+                                                aria-label={isExpanded ? "Hide tickets" : "View tickets"}
+                                              >
+                                                <svg viewBox="0 0 20 20" aria-hidden="true" className="metric-issue-icon">
+                                                  <path
+                                                    d="M3.5 6.5h13v7a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7Zm2-3h9a2 2 0 0 1 2 2v1h-13v-1a2 2 0 0 1 2-2Zm2 7h5"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    strokeWidth="1.4"
+                                                    strokeLinecap="round"
+                                                    strokeLinejoin="round"
+                                                  />
+                                                </svg>
+                                                <svg
+                                                  viewBox="0 0 20 20"
+                                                  aria-hidden="true"
+                                                  className={`metric-issue-chevron ${isExpanded ? "is-open" : ""}`}
                                                 >
-                                                  {ticket.id}
-                                                </a>
-                                              ) : (
-                                                <span key={`${row.key}-${ticket.id}`} className="metric-ticket-text">
-                                                  {ticket.id}
-                                                </span>
-                                              )
+                                                  <path
+                                                    d="M6 8.5 10 12.5 14 8.5"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    strokeWidth="1.6"
+                                                    strokeLinecap="round"
+                                                    strokeLinejoin="round"
+                                                  />
+                                                </svg>
+                                              </button>
                                             )}
                                           </div>
-                                        )}
+                                        </div>
                                       </div>
-                                    </div>
-                                  )}
-                                </Fragment>
-                              );
-                            })}
+                                      {canShowIssues && isExpanded && (
+                                        <div className="analytics-goal-detail-row metric-snapshot-details">
+                                          <div className="metric-snapshot-detail">
+                                            <span className="metric-snapshot-detail-label">Tickets:</span>
+                                            {issueTickets.length === 0 ? (
+                                              <span className="metric-snapshot-empty">No ticket details available.</span>
+                                            ) : (
+                                              <div className="metric-snapshot-ticket-list">
+                                                {issueTickets.map((ticket) =>
+                                                  ticket.link ? (
+                                                    <a
+                                                      key={`${row.key}-${ticket.id}`}
+                                                      href={ticket.link}
+                                                      target="_blank"
+                                                      rel="noreferrer"
+                                                      className="metric-ticket-link"
+                                                    >
+                                                      {ticket.id}
+                                                    </a>
+                                                  ) : (
+                                                    <span key={`${row.key}-${ticket.id}`} className="metric-ticket-text">
+                                                      {ticket.id}
+                                                    </span>
+                                                  )
+                                                )}
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </Fragment>
+                                  );
+                                })}
+                              </Fragment>
+                            ))}
                           </div>
                         </div>
                       )}
