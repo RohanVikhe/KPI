@@ -1,17 +1,19 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../lib/auth.tsx";
+import type { Role } from "../lib/types.ts";
 
 type NavItem = {
   label: string;
   to: string;
-  roles?: string[];
+  roles?: Role[];
+  hideForRoles?: Role[];
   end?: boolean;
 };
 
 const navItems: NavItem[] = [
-  { label: "Dashboard", to: "/", end: true },
-  { label: "My Submissions", to: "/submissions", end: true },
-  { label: "New Entry", to: "/submissions/new" },
+  { label: "Dashboard", to: "/", end: true, hideForRoles: ["ADMIN"] },
+  { label: "My Submissions", to: "/submissions", end: true, hideForRoles: ["ADMIN"] },
+  { label: "New Entry", to: "/submissions/new", hideForRoles: ["ADMIN"] },
   { label: "Analytics", to: "/analytics" },
   { label: "Profile", to: "/profile" },
   { label: "User Access", to: "/users", roles: ["ADMIN", "MANAGER"] },
@@ -35,6 +37,7 @@ export default function Sidebar() {
       <nav className="nav">
         {navItems
           .filter((item) => !item.roles || (user && item.roles.includes(user.role)))
+          .filter((item) => !user || !item.hideForRoles || !item.hideForRoles.includes(user.role))
           .map((item) => (
             <NavLink
               key={item.to}

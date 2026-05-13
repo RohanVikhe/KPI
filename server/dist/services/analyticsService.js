@@ -185,6 +185,9 @@ function getIssueTypeForMetricKey(metricKey) {
     const normalized = metricKey.toLowerCase();
     if (normalized.includes("additional_initiatives"))
         return "additionalInitiative";
+    if (normalized.includes("automation_adoption") || normalized.includes("qp_automated_projects")) {
+        return "aiAdoption";
+    }
     if (normalized.includes("escalation"))
         return "escalation";
     if (normalized.includes("post_delivery") || normalized.includes("post-delivery") || normalized.includes("defect")) {
@@ -258,7 +261,10 @@ function collectIssueTicketsByMetricKey(metricKeys, submissions) {
             const late = Boolean(deliveryDate && dueDate && deliveryDate.getTime() > dueDate.getTime());
             const workType = columns.workType !== -1 ? row[columns.workType]?.trim().toLowerCase() : "";
             const additionalInitiative = workType === "value add";
+            const aiAdoption = workType === "ai adoption" || workType === "automation";
             const ticket = { id: ticketId, link: ticketLink };
+            if (aiAdoption)
+                addTicketForIssue("aiAdoption", ticket);
             if (additionalInitiative)
                 addTicketForIssue("additionalInitiative", ticket);
             if (escalated)
@@ -274,6 +280,22 @@ function collectIssueTicketsByMetricKey(metricKeys, submissions) {
         });
     });
     return Object.fromEntries(map);
+}
+function applyUniqueRawIssueCountsToAggregates(metricKeys, submissions, aggregates) {
+    if (metricKeys.length === 0) {
+        return;
+    }
+    const hasRawDeliveryData = submissions.some((submission) => submission.rawDeliveryData?.rows.length);
+    if (!hasRawDeliveryData) {
+        return;
+    }
+    const issueTicketsByMetricKey = collectIssueTicketsByMetricKey(metricKeys, submissions);
+    metricKeys.forEach((metricKey) => {
+        aggregates.set(metricKey, {
+            weightedTotal: issueTicketsByMetricKey[metricKey]?.length ?? 0,
+            totalDays: 1,
+        });
+    });
 }
 const formulaParser = new Parser({
     operators: {
@@ -592,7 +614,9 @@ export async function getTeamMemberAnalytics(requesterId, requesterRole, targetU
 }
 export async function getTeamCombinedMemberAnalytics(requesterId, requesterRole, range) {
     const userFilter = await resolveTeamUserIds(requesterId, requesterRole);
-    const goalMetricProgress = await getGoalMetricProgressForUsers(userFilter, range);
+    const goalMetricProgress = await getGoalMetricProgressForUsers(userFilter, range, {
+        dedupeAdditionalInitiatives: true,
+    });
     const submissions = await prisma.kpiSubmission.findMany({
         where: {
             userId: { in: userFilter },
@@ -924,7 +948,7 @@ async function getUserGoalProgress(userId, range) {
         return a.name.localeCompare(b.name);
     });
 }
-async function getGoalMetricProgressForUsers(userIds, range) {
+async function getGoalMetricProgressForUsers(userIds, range, options) {
     const submissions = await prisma.kpiSubmission.findMany({
         where: {
             userId: { in: userIds },
@@ -949,6 +973,11 @@ async function getGoalMetricProgressForUsers(userIds, range) {
                             },
                         },
                     },
+                },
+            },
+            goalNotes: {
+                select: {
+                    note: true,
                 },
             },
             values: {
@@ -1047,6 +1076,19 @@ async function getGoalMetricProgressForUsers(userIds, range) {
                 rangeAggregates.set(metric.key, rangeAggregate);
             });
         });
+    }
+    if (options?.dedupeAdditionalInitiatives) {
+        const rawIssueCountMetricKeys = Array.from(new Set(Array.from(goalDefinitions.values()).flatMap((goal) => goal.metrics
+            .filter((metric) => {
+            if (metric.isComputed)
+                return false;
+            const issueType = getIssueTypeForMetricKey(metric.key);
+            return issueType === "additionalInitiative" || issueType === "aiAdoption";
+        })
+            .map((metric) => metric.key))));
+        applyUniqueRawIssueCountsToAggregates(rawIssueCountMetricKeys, submissions.map((submission) => ({
+            rawDeliveryData: extractRawDeliveryDataFromGoalNotes(submission.goalNotes),
+        })), rangeAggregates);
     }
     const monthKeys = Array.from(monthAggregates.keys()).sort((a, b) => (a > b ? 1 : -1));
     const byGoal = new Map();

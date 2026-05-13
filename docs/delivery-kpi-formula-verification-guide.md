@@ -61,7 +61,7 @@ All input metrics in this template are required.
 | Quality & Process | `delivery_error_rework_rate` | `(qp_rework_count / qp_total_deliverables) * 100` |
 | Quality & Process | `process_compliance_rate` | `(qp_compliant_deliveries / qp_total_deliveries) * 100` |
 | Quality & Process | `change_management_adherence` | `(qp_formal_changes / qp_total_changes) * 100` |
-| Quality & Process | `automation_adoption` | `(qp_automated_projects / qp_total_projects) * 100` |
+| Quality & Process | `automation_adoption` | `qp_automated_projects` |
 | Value Add & Client Satisfaction | `additional_initiatives_delivered` | `vc_additional_initiatives` |
 | Value Add & Client Satisfaction | `csat_score` | `(vc_total_score / vc_total_responses)` |
 
@@ -85,7 +85,7 @@ Excel writes formulas into the `Value` column (column `F`) and wraps each formul
 - `F15` (`delivery_error_rework_rate`): `IFERROR((F7/F8)*100,"")`
 - `F16` (`process_compliance_rate`): `IFERROR((F9/F10)*100,"")`
 - `F17` (`change_management_adherence`): `IFERROR((F11/F12)*100,"")`
-- `F18` (`automation_adoption`): `IFERROR((F13/F14)*100,"")`
+- `F18` (`automation_adoption`): `IFERROR(F13,"")`
 
 ### 6.4 Sheet: Value Add & Client Satisfaction
 - `F10` (`additional_initiatives_delivered`): `IFERROR(F7,"")`
@@ -126,8 +126,8 @@ Note: Excel does not auto-calculate goal score and overall score in the workbook
 | `qp_total_deliveries` | Total Deliveries (Process) | Yes | >= 1 | 50 |
 | `qp_formal_changes` | Formally Managed Changes | Yes | >= 0 | 18 |
 | `qp_total_changes` | Total Changes | Yes | >= 1 | 20 |
-| `qp_automated_projects` | Projects Using Automation | Yes | >= 0 | 6 |
-| `qp_total_projects` | Total Projects | Yes | >= 1 | 10 |
+| `qp_automated_projects` | AI Adoption Count | Yes | >= 0 | 6 |
+| `qp_total_projects` | Total Projects (Optional Input) | No | >= 0 | 10 |
 
 ### 7.4 Value Add & Client Satisfaction (User Input)
 | Metric Key | Label | Required | Valid Rule | Sample Value |
@@ -152,7 +152,7 @@ Note: Excel does not auto-calculate goal score and overall score in the workbook
 | `delivery_error_rework_rate` | (2 / 50) * 100 | 4.00 |
 | `process_compliance_rate` | (47 / 50) * 100 | 94.00 |
 | `change_management_adherence` | (18 / 20) * 100 | 90.00 |
-| `automation_adoption` | (6 / 10) * 100 | 60.00 |
+| `automation_adoption` | 6 | 6.00 |
 | `additional_initiatives_delivered` | 2 | 2.00 |
 | `csat_score` | 88 / 20 | 4.40 |
 
@@ -161,11 +161,11 @@ Note: Excel does not auto-calculate goal score and overall score in the workbook
 |---|---|---|
 | `billability_utilization` | (90.91 + 86.96) / 2 | 88.93 |
 | `delivery_excellence` | (90 + 80 + 90 + 90 + 1 + 5) / 6 | 59.33 |
-| `quality_process` | (4 + 94 + 90 + 60) / 4 | 62.00 |
+| `quality_process` | (4 + 94 + 90 + 6) / 4 | 48.50 |
 | `value_client` | (2 + 4.4) / 2 | 3.20 |
 
 ### 8.3 Overall Score
-`overall_score = (88.93 + 59.33 + 62.00 + 3.20) / 4 = 53.37`
+`overall_score = (88.93 + 59.33 + 48.50 + 3.20) / 4 = 49.99`
 
 ## 9. Targets (for manager review)
 - Utilization Rate: target 90-100, acceptable >= 85
@@ -179,7 +179,7 @@ Note: Excel does not auto-calculate goal score and overall score in the workbook
 - Delivery Error/Rework Rate: < 5
 - Process Compliance: > 95
 - Change Management Adherence: > 90
-- Automation Adoption: > 60
+- Automation Adoption: >= 1 per measurement period
 - Additional Initiatives: > 1
 - CSAT: > 4.2/5
 

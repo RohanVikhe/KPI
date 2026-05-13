@@ -15,6 +15,7 @@ const RAW_DELIVERY_MAX_ROWS = 1000;
 const RAW_DELIVERY_TYPE_COLUMN_LETTER = "L";
 const RAW_DELIVERY_TYPE_OPTIONS = [
   "Value Add",
+  "AI Adoption",
   "Bug",
   "Story",
   "Training",
@@ -30,6 +31,7 @@ const RAW_AUTO_METRIC_KEYS = new Set<string>([
   "de_escalation_count",
   "de_post_delivery_defects",
   "de_total_deliveries",
+  "qp_automated_projects",
   "qp_rework_count",
   "qp_total_deliverables",
   "vc_additional_initiatives",
@@ -365,6 +367,7 @@ type ParsedRawDeliveryMetrics = {
   escalationCount: number;
   postDeliveryDefectCount: number;
   projectsOnTimeBudget: number;
+  aiAdoptionCount: number;
   reworkCount: number;
   additionalInitiatives: number;
 };
@@ -396,6 +399,10 @@ const parseRawNumber = (value: unknown) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const isAdditionalInitiativeTypeValue = (value: string) => value === "value add";
+
+const isAiAdoptionTypeValue = (value: string) => value === "ai adoption" || value === "automation";
+
 const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetrics | null => {
   const rows = readSheetRows(sheet);
   const headerIndex = findRawDeliveryHeaderIndex(rows);
@@ -416,6 +423,7 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
   let escalationCount = 0;
   let postDeliveryDefectCount = 0;
   let projectsOnTimeBudget = 0;
+  let aiAdoptionCount = 0;
   let reworkCount = 0;
   let additionalInitiatives = 0;
   let hasRowData = false;
@@ -493,14 +501,15 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     } else if (reworkFlag === true) {
       reworkCount += 1;
     }
+    if (columns.type !== -1 && isAiAdoptionTypeValue(typeValue)) {
+      aiAdoptionCount += 1;
+    }
     if (columns.additionalInitiatives !== -1) {
       if (normalizeYesNo(row[columns.additionalInitiatives]) === true) {
         additionalInitiatives += 1;
       }
-    } else if (columns.type !== -1) {
-      if (typeValue === "value add") {
-        additionalInitiatives += 1;
-      }
+    } else if (columns.type !== -1 && isAdditionalInitiativeTypeValue(typeValue)) {
+      additionalInitiatives += 1;
     }
   }
 
@@ -514,6 +523,7 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     escalationCount,
     postDeliveryDefectCount,
     projectsOnTimeBudget,
+    aiAdoptionCount,
     reworkCount,
     additionalInitiatives,
   };
@@ -648,6 +658,7 @@ const deriveRawMetricValues = (workbook: XLSX.WorkBook, template: Template): Imp
       toEntry("de_escalation_count", parsed.escalationCount),
       toEntry("de_post_delivery_defects", parsed.postDeliveryDefectCount),
       toEntry("de_total_deliveries", parsed.totalDelivered),
+      toEntry("qp_automated_projects", parsed.aiAdoptionCount),
       toEntry("qp_rework_count", parsed.reworkCount),
       toEntry("qp_total_deliverables", parsed.totalDelivered),
       toEntry("vc_additional_initiatives", parsed.additionalInitiatives),
@@ -903,6 +914,7 @@ export default function NewSubmissionPage() {
       de_escalation_count: `IFERROR(${rawSheetRef}!B${rawEscalationCountRow}, "")`,
       de_post_delivery_defects: `IFERROR(${rawSheetRef}!B${rawPostDefectCountRow}, "")`,
       de_total_deliveries: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
+      qp_automated_projects: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$L$${rawDataStartRow}:$L$${rawDataEndRow},"AI Adoption"))`,
       qp_rework_count: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",SUM(${rawSheetRef}!$I$${rawDataStartRow}:$I$${rawDataEndRow}))`,
       qp_total_deliverables: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
       vc_additional_initiatives: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$L$${rawDataStartRow}:$L$${rawDataEndRow},"Value Add"))`,

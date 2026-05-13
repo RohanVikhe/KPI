@@ -185,6 +185,8 @@ type SnapshotVisualStatus = MetricTargetStatus | "warning";
 const SNAPSHOT_THRESHOLD_BY_KEY: Record<string, SnapshotThresholdRule> = {
   additional_initiatives_delivered: { direction: "min", value: 1 },
   vc_additional_initiatives: { direction: "min", value: 1 },
+  automation_adoption: { direction: "min", value: 1 },
+  qp_automated_projects: { direction: "min", value: 1 },
   delivery_error_rework_rate: { direction: "max", value: 5 },
   qp_rework_count: { direction: "max", value: 5 },
 };
@@ -194,7 +196,6 @@ const TEMPORARY_ZERO_WARNING_METRIC_KEYS = new Set([
   "scope_change_control",
   "process_compliance_rate",
   "change_management_adherence",
-  "automation_adoption",
 ]);
 
 function parseTargetRange(
@@ -326,6 +327,11 @@ function isReworkMetricKey(metricKey: string) {
 
 function isAdditionalInitiativesMetricKey(metricKey: string) {
   return metricKey.toLowerCase().includes("additional_initiatives");
+}
+
+function isAiAdoptionMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("automation_adoption") || normalized.includes("qp_automated_projects");
 }
 
 export default function AnalyticsPage() {
@@ -923,11 +929,13 @@ export default function AnalyticsPage() {
                                   const issueTickets = metricIssueTicketsByKey.get(row.key) ?? [];
                                   const isReworkMetric = isReworkMetricKey(row.key);
                                   const isAdditionalInitiativesMetric = isAdditionalInitiativesMetricKey(row.key);
+                                  const isAiAdoptionMetric = isAiAdoptionMetricKey(row.key);
                                   const canShowIssues =
                                     visualStatus !== "warning" &&
                                     (targetStatus === "out" ||
                                       (isReworkMetric && issueTickets.length > 0) ||
-                                      (isAdditionalInitiativesMetric && issueTickets.length > 0));
+                                      (isAdditionalInitiativesMetric && issueTickets.length > 0) ||
+                                      (isAiAdoptionMetric && issueTickets.length > 0));
                                   const isExpanded = expandedSnapshotKeys.has(row.key);
 
                                   return (

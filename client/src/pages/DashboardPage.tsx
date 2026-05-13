@@ -67,12 +67,13 @@ type IssueTicket = {
   link?: string | null;
 };
 
-type RawIssueType = "escalation" | "postDefect" | "rework" | "late" | "notFtr";
+type RawIssueType = "escalation" | "postDefect" | "rework" | "late" | "notFtr" | "aiAdoption";
 
 type RawIssueColumns = {
   ticketId: number;
   deliveryDate: number;
   dueDate: number;
+  workType: number;
   reworkFlag: number;
   reworkCount: number;
   escalationFlag: number;
@@ -127,7 +128,7 @@ function shouldUsePerPeriodTarget(targetText?: string | null) {
   return normalized.includes("per measurement period") || normalized.includes("per period");
 }
 
-const PER_PERIOD_SKIP_METRIC_KEYS = new Set(["additional_initiatives_delivered"]);
+const PER_PERIOD_SKIP_METRIC_KEYS = new Set(["additional_initiatives_delivered", "automation_adoption"]);
 
 function adjustValueForPeriod(
   value: number | null,
@@ -240,6 +241,8 @@ type SnapshotVisualStatus = MetricTargetStatus | "warning";
 const SNAPSHOT_THRESHOLD_BY_KEY: Record<string, SnapshotThresholdRule> = {
   additional_initiatives_delivered: { direction: "min", value: 1 },
   vc_additional_initiatives: { direction: "min", value: 1 },
+  automation_adoption: { direction: "min", value: 1 },
+  qp_automated_projects: { direction: "min", value: 1 },
   delivery_error_rework_rate: { direction: "max", value: 5 },
   qp_rework_count: { direction: "max", value: 5 },
 };
@@ -249,7 +252,6 @@ const TEMPORARY_ZERO_WARNING_METRIC_KEYS = new Set([
   "scope_change_control",
   "process_compliance_rate",
   "change_management_adherence",
-  "automation_adoption",
 ]);
 
 function getThresholdStatus(metricKey: string, value: number | null | undefined): MetricTargetStatus | null {
@@ -323,6 +325,7 @@ function getRawIssueColumns(headers: string[]): RawIssueColumns {
     ticketId: findByOptions([["ticket", "id"], ["ticket", "#"]]),
     deliveryDate: findByOptions([["delivery", "date"]]),
     dueDate: findByOptions([["due", "date"]]),
+    workType: findByOptions([["type"]]),
     reworkFlag: findByOptions([["rework", "flag"], ["rework", "y/n"]]),
     reworkCount: findByOptions([["rework", "count"]]),
     escalationFlag: findByOptions([["esc", "flag"], ["escalat", "flag"], ["escalat", "y/n"]]),
@@ -335,6 +338,9 @@ function getRawIssueColumns(headers: string[]): RawIssueColumns {
 
 function getIssueTypeForMetricKey(metricKey: string): RawIssueType | null {
   const normalized = metricKey.toLowerCase();
+  if (normalized.includes("automation_adoption") || normalized.includes("qp_automated_projects")) {
+    return "aiAdoption";
+  }
   if (normalized.includes("escalation")) return "escalation";
   if (normalized.includes("post_delivery") || normalized.includes("post-delivery") || normalized.includes("defect")) {
     return "postDefect";
@@ -352,6 +358,11 @@ function getIssueTypeForMetricKey(metricKey: string): RawIssueType | null {
 function isReworkMetricKey(metricKey: string) {
   const normalized = metricKey.toLowerCase();
   return normalized.includes("rework");
+}
+
+function isAiAdoptionMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("automation_adoption") || normalized.includes("qp_automated_projects");
 }
 
 function toUtcDateOnly(value: string) {
@@ -851,9 +862,12 @@ export default function DashboardPage() {
         const deliveryDate = columns.deliveryDate !== -1 ? parseDateValue(row[columns.deliveryDate]) : null;
         const dueDate = columns.dueDate !== -1 ? parseDateValue(row[columns.dueDate]) : null;
         const late = Boolean(deliveryDate && dueDate && deliveryDate.getTime() > dueDate.getTime());
+        const workType = columns.workType !== -1 ? row[columns.workType]?.trim().toLowerCase() : "";
+        const aiAdoption = workType === "ai adoption" || workType === "automation";
 
         const ticket = { id: ticketId, link: ticketLink };
 
+        if (aiAdoption) addTicketForIssue("aiAdoption", ticket);
         if (escalated) addTicketForIssue("escalation", ticket);
         if (postDefect) addTicketForIssue("postDefect", ticket);
         if (rework) addTicketForIssue("rework", ticket);
@@ -1256,8 +1270,12 @@ export default function DashboardPage() {
                 const statusClass = getSnapshotStatusClass(visualStatus);
                 const issueTickets = metricIssueTicketsByKey.get(row.key) ?? [];
                 const isReworkMetric = isReworkMetricKey(row.key);
+                const isAiAdoptionMetric = isAiAdoptionMetricKey(row.key);
                 const canShowIssues =
-                  visualStatus !== "warning" && (targetStatus === "out" || (isReworkMetric && issueTickets.length > 0));
+                  visualStatus !== "warning" &&
+                  (targetStatus === "out" ||
+                    (isReworkMetric && issueTickets.length > 0) ||
+                    (isAiAdoptionMetric && issueTickets.length > 0));
                 const isExpanded = expandedSnapshotKeys.has(row.key);
 
                 return (
