@@ -12,7 +12,7 @@ const INVALID_SHEET_CHARS = /[\/?*\[\]:]/g;
 const RAW_DELIVERY_SHEET_NAMES = ["raw delivery log", "raw data", "delivery raw data", "data"];
 const RAW_DELIVERY_DEFAULT_SHEET_NAME = "Raw Delivery Log";
 const RAW_DELIVERY_MAX_ROWS = 1000;
-const RAW_DELIVERY_TYPE_COLUMN_LETTER = "L";
+const RAW_DELIVERY_TYPE_COLUMN_LETTER = "M";
 const RAW_DELIVERY_TYPE_OPTIONS = [
   "Value Add",
   "AI Adoption",
@@ -35,6 +35,10 @@ const RAW_AUTO_METRIC_KEYS = new Set<string>([
   "qp_rework_count",
   "qp_total_deliverables",
   "vc_additional_initiatives",
+  "de_approved_scope_changes",
+  "de_total_scope_requests",
+  "qp_formal_changes",
+  "qp_total_changes",
 ]);
 
 const normalizeLabel = (value: unknown) => String(value ?? "").trim().toLowerCase();
@@ -330,6 +334,8 @@ type RawDeliveryColumnIndexes = {
   dueDate: number;
   additionalInitiatives: number;
   type: number;
+  scopeChange: number;
+  processFollowed: number;
 };
 
 const getRawDeliveryColumnIndexes = (headers: string[]): RawDeliveryColumnIndexes => ({
@@ -344,6 +350,8 @@ const getRawDeliveryColumnIndexes = (headers: string[]): RawDeliveryColumnIndexe
   dueDate: findColumnByFragments(headers, ["due", "date"]),
   additionalInitiatives: findColumnByFragments(headers, ["additional", "initiative"]),
   type: findColumnByFragments(headers, ["type"]),
+  scopeChange: findColumnByFragments(headers, ["scope", "change"]),
+  processFollowed: findColumnByFragments(headers, ["process", "followed"]),
 });
 
 const hasRawDeliveryRequiredColumns = (columns: RawDeliveryColumnIndexes) => {
@@ -370,6 +378,8 @@ type ParsedRawDeliveryMetrics = {
   aiAdoptionCount: number;
   reworkCount: number;
   additionalInitiatives: number;
+  scopeChangeCount: number;
+  formalChangeCount: number;
 };
 
 type RawDeliveryDataPayload = {
@@ -426,6 +436,8 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
   let aiAdoptionCount = 0;
   let reworkCount = 0;
   let additionalInitiatives = 0;
+  let scopeChangeCount = 0;
+  let formalChangeCount = 0;
   let hasRowData = false;
 
   for (const row of rows.slice(headerIndex + 1)) {
@@ -447,6 +459,8 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
       postDefectCountCell,
       columns.additionalInitiatives === -1 ? "" : row[columns.additionalInitiatives],
       columns.type === -1 ? "" : row[columns.type],
+      columns.scopeChange === -1 ? "" : row[columns.scopeChange],
+      columns.processFollowed === -1 ? "" : row[columns.processFollowed],
     ].some((cell) => normalizeCell(cell).length > 0);
 
     if (!hasTrackingValue) {
@@ -475,6 +489,9 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     const postDefect = postDefectFlag === true || rowPostDefectCount > 0;
 
     const typeValue = columns.type !== -1 ? normalizeLabel(row[columns.type]) : "";
+
+    const scopeChangeFlag = columns.scopeChange !== -1 ? normalizeYesNo(row[columns.scopeChange]) : null;
+    const processFollowedFlag = columns.processFollowed !== -1 ? normalizeYesNo(row[columns.processFollowed]) : null;
 
     if (delivered) {
       totalDelivered += 1;
@@ -511,6 +528,13 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     } else if (columns.type !== -1 && isAdditionalInitiativeTypeValue(typeValue)) {
       additionalInitiatives += 1;
     }
+
+    if (scopeChangeFlag === true) {
+      scopeChangeCount += 1;
+    }
+    if (processFollowedFlag === true) {
+      formalChangeCount += 1;
+    }
   }
 
   if (!hasRowData) {
@@ -526,6 +550,8 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     aiAdoptionCount,
     reworkCount,
     additionalInitiatives,
+    scopeChangeCount,
+    formalChangeCount,
   };
 };
 
@@ -662,6 +688,10 @@ const deriveRawMetricValues = (workbook: XLSX.WorkBook, template: Template): Imp
       toEntry("qp_rework_count", parsed.reworkCount),
       toEntry("qp_total_deliverables", parsed.totalDelivered),
       toEntry("vc_additional_initiatives", parsed.additionalInitiatives),
+      toEntry("de_total_scope_requests", parsed.totalDelivered),
+      toEntry("de_approved_scope_changes", parsed.scopeChangeCount),
+      toEntry("qp_total_changes", parsed.scopeChangeCount),
+      toEntry("qp_formal_changes", parsed.formalChangeCount),
     ].filter(Boolean) as ImportedMetricValue[];
   }
 
@@ -804,10 +834,12 @@ export default function NewSubmissionPage() {
         "Work Start Date",
         "Delivery Date",
         "Rework Count",
+        "Scope Change",
         "Escalation Level",
         "Post-Delivery Defect Count",
         "Type",
         "Root Cause",
+        "Process followed for Change request",
         "FTR Flag",
         "ESC Flag",
         "PDD Flag",
@@ -830,9 +862,11 @@ export default function NewSubmissionPage() {
         null,
         null,
         null,
+        null,
+        null,
         { f: `IF(H${rowNumber}="","",IF(IFERROR(VALUE(I${rowNumber}),0)=0,1,0))` },
-        { f: `IF(H${rowNumber}="","",IF(AND(LOWER(TRIM(J${rowNumber}))<>"",LOWER(TRIM(J${rowNumber}))<>"none"),1,0))` },
-        { f: `IF(H${rowNumber}="","",IF(IFERROR(VALUE(K${rowNumber}),0)>0,1,0))` },
+        { f: `IF(H${rowNumber}="","",IF(AND(LOWER(TRIM(K${rowNumber}))<>"",LOWER(TRIM(K${rowNumber}))<>"none"),1,0))` },
+        { f: `IF(H${rowNumber}="","",IF(IFERROR(VALUE(L${rowNumber}),0)>0,1,0))` },
       ]);
     }
 
@@ -849,17 +883,17 @@ export default function NewSubmissionPage() {
     ]);
     rawRows.push([
       "First Time Right Count",
-      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(N${rawDataStartRow}:N${rawDataEndRow}))` },
+      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(P${rawDataStartRow}:P${rawDataEndRow}))` },
       "Count",
     ]);
     rawRows.push([
       "Escalation Count",
-      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(O${rawDataStartRow}:O${rawDataEndRow}))` },
+      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(Q${rawDataStartRow}:Q${rawDataEndRow}))` },
       "Count",
     ]);
     rawRows.push([
       "Post-Delivery Defect Count",
-      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(P${rawDataStartRow}:P${rawDataEndRow}))` },
+      { f: `IF(B${rawTotalDeliveredRow}="","",SUM(R${rawDataStartRow}:R${rawDataEndRow}))` },
       "Count",
     ]);
     rawRows.push([
@@ -896,9 +930,11 @@ export default function NewSubmissionPage() {
       { wch: 14 },
       { wch: 12 },
       { wch: 16 },
+      { wch: 16 },
       { wch: 18 },
       { wch: 12 },
       { wch: 24 },
+      { wch: 34 },
       { wch: 10 },
       { wch: 10 },
       { wch: 10 },
@@ -914,10 +950,14 @@ export default function NewSubmissionPage() {
       de_escalation_count: `IFERROR(${rawSheetRef}!B${rawEscalationCountRow}, "")`,
       de_post_delivery_defects: `IFERROR(${rawSheetRef}!B${rawPostDefectCountRow}, "")`,
       de_total_deliveries: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
-      qp_automated_projects: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$L$${rawDataStartRow}:$L$${rawDataEndRow},"AI Adoption"))`,
+      qp_automated_projects: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$M$${rawDataStartRow}:$M$${rawDataEndRow},"AI Adoption"))`,
       qp_rework_count: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",SUM(${rawSheetRef}!$I$${rawDataStartRow}:$I$${rawDataEndRow}))`,
       qp_total_deliverables: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
-      vc_additional_initiatives: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$L$${rawDataStartRow}:$L$${rawDataEndRow},"Value Add"))`,
+      vc_additional_initiatives: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$M$${rawDataStartRow}:$M$${rawDataEndRow},"Value Add"))`,
+      de_total_scope_requests: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
+      de_approved_scope_changes: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$J$${rawDataStartRow}:$J$${rawDataEndRow},"*Yes*",${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>"))`,
+      qp_total_changes: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$J$${rawDataStartRow}:$J$${rawDataEndRow},"*Yes*",${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>"))`,
+      qp_formal_changes: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$O$${rawDataStartRow}:$O$${rawDataEndRow},"*Yes*",${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>"))`,
     };
 
     downloadGoals.forEach((goal, index) => {
