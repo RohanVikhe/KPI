@@ -251,7 +251,6 @@ const TEMPORARY_ZERO_WARNING_METRIC_KEYS = new Set([
   "schedule_adherence",
   "scope_change_control",
   "process_compliance_rate",
-  "change_management_adherence",
 ]);
 
 function getThresholdStatus(metricKey: string, value: number | null | undefined): MetricTargetStatus | null {

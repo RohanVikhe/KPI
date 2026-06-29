@@ -6,6 +6,7 @@ import { evaluateFormula } from "../lib/formula.ts";
 import type { Comment, Review, Submission } from "../lib/types.ts";
 import { useAuth } from "../lib/auth.tsx";
 import MessageToast from "../components/MessageToast.tsx";
+import AiInsightsPanel from "../features/ai/AiInsightsPanel.tsx";
 
 function formatDateTime(value?: string | null) {
   if (!value) return "—";
@@ -515,6 +516,14 @@ export default function SubmissionDetailPage() {
           </button>
         </form>
       </div>
+
+      {canReview && (
+        <AiInsightsPanel
+          submissionId={id!}
+          employeeName={submission.user?.name ?? "Employee"}
+          onDraftGenerated={(draft) => setReviewComment(draft)}
+        />
+      )}
 
       {canReview && (
         <div className="panel">

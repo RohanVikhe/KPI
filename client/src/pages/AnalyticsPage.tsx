@@ -6,6 +6,7 @@ import { apiFetch } from "../lib/api.ts";
 import { useAuth } from "../lib/auth.tsx";
 import type { Template } from "../lib/types.ts";
 import DateRangePicker from "../components/DateRangePicker.tsx";
+import AiMetricSummary from "../features/ai/AiMetricSummary.tsx";
 
 type UserAnalytics = {
   points: { date: string; score: number }[];
@@ -195,7 +196,6 @@ const TEMPORARY_ZERO_WARNING_METRIC_KEYS = new Set([
   "schedule_adherence",
   "scope_change_control",
   "process_compliance_rate",
-  "change_management_adherence",
 ]);
 
 function parseTargetRange(
@@ -887,7 +887,8 @@ export default function AnalyticsPage() {
                             : "No metrics available for this user."}
                         </div>
                       ) : (
-                        <div className="analytics-goal-detail-card">
+                        <>
+                          <div className="analytics-goal-detail-card">
                           <div className="panel-header">
                             <h4>Metric Snapshot</h4>
                             <span className="panel-sub">
@@ -1034,7 +1035,21 @@ export default function AnalyticsPage() {
                             ))}
                           </div>
                         </div>
-                      )}
+                        {/* AI Metric Summary — available for both team and individual views */}
+                        {memberMetricSnapshotRows.length > 0 && (
+                          <AiMetricSummary
+                            employeeName={isAllTeamMembersView ? "the Entire Team" : teamMemberAnalytics?.user?.name || "Employee"}
+                            isTeamView={isAllTeamMembersView}
+                            dateRange={activeDateRangeLabel}
+                            metrics={memberMetricSnapshotRows.map((r) => ({
+                              label: r.label,
+                              value: r.averageValue,
+                              type: r.type,
+                            }))}
+                          />
+                        )}
+                      </>
+                    )}
                     </div>
                   )}
                 </div>

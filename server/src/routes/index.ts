@@ -5,6 +5,7 @@ import templateRoutes from "./templates.js";
 import submissionRoutes from "./submissions.js";
 import analyticsRoutes from "./analytics.js";
 import projectRoutes from "./projects.js";
+import { aiRouter } from "../ai/aiRoutes.js";
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use("/templates", templateRoutes);
 router.use("/submissions", submissionRoutes);
 router.use("/analytics", analyticsRoutes);
 router.use("/projects", projectRoutes);
+router.use("/ai", aiRouter);
 
 export default router;

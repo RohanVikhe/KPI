@@ -16,6 +16,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google/genai": "^2.3.0",
     "@prisma/client": "^6.7.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",

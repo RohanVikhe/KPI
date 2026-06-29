@@ -37,8 +37,6 @@ const RAW_AUTO_METRIC_KEYS = new Set<string>([
   "vc_additional_initiatives",
   "de_approved_scope_changes",
   "de_total_scope_requests",
-  "qp_formal_changes",
-  "qp_total_changes",
 ]);
 
 const normalizeLabel = (value: unknown) => String(value ?? "").trim().toLowerCase();
@@ -690,8 +688,6 @@ const deriveRawMetricValues = (workbook: XLSX.WorkBook, template: Template): Imp
       toEntry("vc_additional_initiatives", parsed.additionalInitiatives),
       toEntry("de_total_scope_requests", parsed.totalDelivered),
       toEntry("de_approved_scope_changes", parsed.scopeChangeCount),
-      toEntry("qp_total_changes", parsed.scopeChangeCount),
-      toEntry("qp_formal_changes", parsed.formalChangeCount),
     ].filter(Boolean) as ImportedMetricValue[];
   }
 
@@ -839,7 +835,7 @@ export default function NewSubmissionPage() {
         "Post-Delivery Defect Count",
         "Type",
         "Root Cause",
-        "Process followed for Change request",
+        "Ticket completed within milestone",
         "FTR Flag",
         "ESC Flag",
         "PDD Flag",
@@ -956,8 +952,6 @@ export default function NewSubmissionPage() {
       vc_additional_initiatives: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$M$${rawDataStartRow}:$M$${rawDataEndRow},"Value Add"))`,
       de_total_scope_requests: `IFERROR(${rawSheetRef}!B${rawTotalDeliveredRow}, "")`,
       de_approved_scope_changes: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$J$${rawDataStartRow}:$J$${rawDataEndRow},"*Yes*",${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>"))`,
-      qp_total_changes: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$J$${rawDataStartRow}:$J$${rawDataEndRow},"*Yes*",${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>"))`,
-      qp_formal_changes: `IF(COUNTIFS(${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>")=0,"",COUNTIFS(${rawSheetRef}!$O$${rawDataStartRow}:$O$${rawDataEndRow},"*Yes*",${rawSheetRef}!$H$${rawDataStartRow}:$H$${rawDataEndRow},"<>"))`,
     };
 
     downloadGoals.forEach((goal, index) => {
