@@ -11,8 +11,9 @@ import {
 } from "../services/userService.js";
 import { AppError } from "../utils/errors.js";
 
-export async function listUsersHandler(_req: Request, res: Response) {
-  const users = await listUsers();
+export async function listUsersHandler(req: Request, res: Response) {
+  const activeOnly = String(req.query.activeOnly || "").toLowerCase() === "true";
+  const users = await listUsers({ activeOnly });
   return res.json({ users });
 }
 
@@ -20,7 +21,8 @@ export async function listTeamHandler(req: Request, res: Response) {
   if (!req.user) {
     throw new AppError("Authorization required", 401, "AUTH_REQUIRED");
   }
-  const users = await listTeamUsers(req.user.id);
+  const activeOnly = String(req.query.activeOnly || "").toLowerCase() === "true";
+  const users = await listTeamUsers(req.user.id, { activeOnly });
   return res.json({ users });
 }
 

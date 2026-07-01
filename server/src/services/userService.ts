@@ -49,8 +49,10 @@ function shapeUserProjectsWithCounts(
   });
 }
 
-export async function listUsers() {
+export async function listUsers(options?: { activeOnly?: boolean }) {
+  const where = options?.activeOnly ? { isActive: true } : undefined;
   const users = await prisma.user.findMany({
+    where,
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
@@ -84,9 +86,10 @@ export async function listUsers() {
   }));
 }
 
-export async function listTeamUsers(managerId: string) {
+export async function listTeamUsers(managerId: string, options?: { activeOnly?: boolean }) {
+  const where = options?.activeOnly ? { managerId, isActive: true } : { managerId };
   const users = await prisma.user.findMany({
-    where: { managerId },
+    where,
     select: {
       id: true,
       name: true,

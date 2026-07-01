@@ -67,7 +67,7 @@ type IssueTicket = {
   link?: string | null;
 };
 
-type RawIssueType = "escalation" | "postDefect" | "rework" | "late" | "notFtr" | "aiAdoption";
+type RawIssueType = "escalation" | "postDefect" | "rework" | "late" | "notFtr" | "aiAdoption" | "scopeChange";
 
 type RawIssueColumns = {
   ticketId: number;
@@ -81,6 +81,7 @@ type RawIssueColumns = {
   postDefectFlag: number;
   postDefectCount: number;
   ftrFlag: number;
+  scopeChange: number;
 };
 
 type MetricAggregate = {
@@ -332,6 +333,7 @@ function getRawIssueColumns(headers: string[]): RawIssueColumns {
     postDefectFlag: findByOptions([["pdd", "flag"], ["defect", "flag"]]),
     postDefectCount: findByOptions([["defect", "count"]]),
     ftrFlag: findByOptions([["ftr", "flag"], ["first", "time", "right"]]),
+    scopeChange: findByOptions([["scope", "change"]]),
   };
 }
 
@@ -351,7 +353,15 @@ function getIssueTypeForMetricKey(metricKey: string): RawIssueType | null {
   if (normalized.includes("on_time_delivery") || normalized.includes("projects_on_time_budget")) {
     return "late";
   }
+  if (normalized.includes("scope")) {
+    return "scopeChange";
+  }
   return null;
+}
+
+function isScopeChangeMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("scope");
 }
 
 function isReworkMetricKey(metricKey: string) {
@@ -506,7 +516,7 @@ export default function DashboardPage() {
     enabled: canViewTeamProjects,
     queryFn: () =>
       apiFetch<{ users: DashboardUserProjects[] }>(
-        user?.role === "ADMIN" ? "/users" : "/users/team"
+        user?.role === "ADMIN" ? "/users?activeOnly=true" : "/users/team?activeOnly=true"
       ),
   });
 
@@ -804,7 +814,8 @@ export default function DashboardPage() {
       const status = metricTargetStatusByKey.get(row.key);
       const includeBecauseRed = status === "out";
       const includeBecauseRework = isReworkMetricKey(row.key);
-      if (!includeBecauseRed && !includeBecauseRework) return;
+      const includeBecauseScope = isScopeChangeMetricKey(row.key);
+      if (!includeBecauseRed && !includeBecauseRework && !includeBecauseScope) return;
       const issueType = getIssueTypeForMetricKey(row.key);
       if (!issueType) return;
       const list = keysByIssueType.get(issueType) ?? [];
@@ -864,6 +875,9 @@ export default function DashboardPage() {
         const workType = columns.workType !== -1 ? row[columns.workType]?.trim().toLowerCase() : "";
         const aiAdoption = workType === "ai adoption" || workType === "automation";
 
+        const scopeChangeFlag =
+          columns.scopeChange !== -1 ? parseBoolish(row[columns.scopeChange]) === true : false;
+
         const ticket = { id: ticketId, link: ticketLink };
 
         if (aiAdoption) addTicketForIssue("aiAdoption", ticket);
@@ -872,6 +886,7 @@ export default function DashboardPage() {
         if (rework) addTicketForIssue("rework", ticket);
         if (notFtr) addTicketForIssue("notFtr", ticket);
         if (late) addTicketForIssue("late", ticket);
+        if (scopeChangeFlag) addTicketForIssue("scopeChange", ticket);
       });
     });
 
@@ -1270,11 +1285,13 @@ export default function DashboardPage() {
                 const issueTickets = metricIssueTicketsByKey.get(row.key) ?? [];
                 const isReworkMetric = isReworkMetricKey(row.key);
                 const isAiAdoptionMetric = isAiAdoptionMetricKey(row.key);
+                const isScopeChangeMetric = isScopeChangeMetricKey(row.key);
                 const canShowIssues =
                   visualStatus !== "warning" &&
                   (targetStatus === "out" ||
                     (isReworkMetric && issueTickets.length > 0) ||
-                    (isAiAdoptionMetric && issueTickets.length > 0));
+                    (isAiAdoptionMetric && issueTickets.length > 0) ||
+                    (isScopeChangeMetric && issueTickets.length > 0));
                 const isExpanded = expandedSnapshotKeys.has(row.key);
 
                 return (

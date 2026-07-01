@@ -179,6 +179,7 @@ function getRawIssueColumns(headers) {
         postDefectFlag: findByOptions([["pdd", "flag"], ["defect", "flag"]]),
         postDefectCount: findByOptions([["defect", "count"]]),
         ftrFlag: findByOptions([["ftr", "flag"], ["first", "time", "right"]]),
+        scopeChange: findByOptions([["scope", "change"]]),
     };
 }
 function getIssueTypeForMetricKey(metricKey) {
@@ -200,6 +201,9 @@ function getIssueTypeForMetricKey(metricKey) {
     }
     if (normalized.includes("on_time_delivery") || normalized.includes("projects_on_time_budget")) {
         return "late";
+    }
+    if (normalized.includes("scope")) {
+        return "scopeChange";
     }
     return null;
 }
@@ -262,6 +266,7 @@ function collectIssueTicketsByMetricKey(metricKeys, submissions) {
             const workType = columns.workType !== -1 ? row[columns.workType]?.trim().toLowerCase() : "";
             const additionalInitiative = workType === "value add";
             const aiAdoption = workType === "ai adoption" || workType === "automation";
+            const scopeChangeFlag = columns.scopeChange !== -1 ? parseBoolish(row[columns.scopeChange]) === true : false;
             const ticket = { id: ticketId, link: ticketLink };
             if (aiAdoption)
                 addTicketForIssue("aiAdoption", ticket);
@@ -277,6 +282,8 @@ function collectIssueTicketsByMetricKey(metricKeys, submissions) {
                 addTicketForIssue("notFtr", ticket);
             if (late)
                 addTicketForIssue("late", ticket);
+            if (scopeChangeFlag)
+                addTicketForIssue("scopeChange", ticket);
         });
     });
     return Object.fromEntries(map);
@@ -463,13 +470,13 @@ export async function getUserAnalytics(userId, range) {
 async function resolveTeamUserIds(requesterId, requesterRole) {
     if (requesterRole === Role.ADMIN) {
         const users = await prisma.user.findMany({
-            where: { role: { in: [Role.EMPLOYEE, Role.MANAGER] } },
+            where: { role: { in: [Role.EMPLOYEE, Role.MANAGER] }, isActive: true },
             select: { id: true },
         });
         return users.map((user) => user.id);
     }
     const reports = await prisma.user.findMany({
-        where: { managerId: requesterId },
+        where: { managerId: requesterId, isActive: true },
         select: { id: true },
     });
     return reports.map((report) => report.id);

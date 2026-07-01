@@ -228,6 +228,12 @@ const normalizeYesNo = (value: unknown) => {
   return null;
 };
 
+const normalizeScopeChange = (value: unknown) => {
+  const normalized = normalizeLabel(value);
+  if (["y", "yes", "true", "1"].includes(normalized)) return true;
+  return null;
+};
+
 const parseSpreadsheetDateValue = (value: unknown) => {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return { kind: "valid" as const, date: value };
@@ -378,6 +384,7 @@ type ParsedRawDeliveryMetrics = {
   additionalInitiatives: number;
   scopeChangeCount: number;
   formalChangeCount: number;
+  scopeChangeRequestsCount: number;
 };
 
 type RawDeliveryDataPayload = {
@@ -436,6 +443,7 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
   let additionalInitiatives = 0;
   let scopeChangeCount = 0;
   let formalChangeCount = 0;
+  let scopeChangeRequestsCount = 0;
   let hasRowData = false;
 
   for (const row of rows.slice(headerIndex + 1)) {
@@ -488,13 +496,16 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
 
     const typeValue = columns.type !== -1 ? normalizeLabel(row[columns.type]) : "";
 
-    const scopeChangeFlag = columns.scopeChange !== -1 ? normalizeYesNo(row[columns.scopeChange]) : null;
+    const scopeChangeFlag = columns.scopeChange !== -1 ? normalizeScopeChange(row[columns.scopeChange]) : null;
     const processFollowedFlag = columns.processFollowed !== -1 ? normalizeYesNo(row[columns.processFollowed]) : null;
 
     if (delivered) {
       totalDelivered += 1;
       if (!hasRework) {
         firstTimeRightCount += 1;
+      }
+      if (scopeChangeFlag !== null) {
+        scopeChangeRequestsCount += 1;
       }
       if (columns.dueDate !== -1 && columns.deliveryDate !== -1) {
         const dueDate = parseRawDate(row[columns.dueDate]);
@@ -550,6 +561,7 @@ const parseRawDeliveryMetrics = (sheet: XLSX.WorkSheet): ParsedRawDeliveryMetric
     additionalInitiatives,
     scopeChangeCount,
     formalChangeCount,
+    scopeChangeRequestsCount,
   };
 };
 
@@ -1567,7 +1579,7 @@ export default function NewSubmissionPage() {
           </label>
         </div>
 
-        <div className="form-grid">
+        <div className="form-grid" style={{ display: "none" }}>
           <label className="form-field">
             <span>Template</span>
             <select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>
@@ -1590,7 +1602,7 @@ export default function NewSubmissionPage() {
           </label>
         </div>
 
-        <div className="goal-grid">
+        <div className="goal-grid" style={{ display: "none" }}>
           {template?.goals.map((goal) => (
             <div key={goal.id} className="goal-section">
               <div className="goal-header">
@@ -1642,7 +1654,7 @@ export default function NewSubmissionPage() {
           ))}
         </div>
 
-        <button className="btn btn-primary" type="submit" disabled={mutation.isPending}>
+        <button className="btn btn-primary" type="submit" disabled={mutation.isPending} style={{ display: "none" }}>
           {mutation.isPending ? "Saving..." : "Submit KPI"}
         </button>
       </form>

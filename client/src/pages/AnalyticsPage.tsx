@@ -334,6 +334,11 @@ function isAiAdoptionMetricKey(metricKey: string) {
   return normalized.includes("automation_adoption") || normalized.includes("qp_automated_projects");
 }
 
+function isScopeChangeMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("scope");
+}
+
 export default function AnalyticsPage() {
   const { user } = useAuth();
   const canViewTeamAnalytics = user?.role === "MANAGER" || user?.role === "ADMIN";
@@ -931,12 +936,14 @@ export default function AnalyticsPage() {
                                   const isReworkMetric = isReworkMetricKey(row.key);
                                   const isAdditionalInitiativesMetric = isAdditionalInitiativesMetricKey(row.key);
                                   const isAiAdoptionMetric = isAiAdoptionMetricKey(row.key);
+                                  const isScopeChangeMetric = isScopeChangeMetricKey(row.key);
                                   const canShowIssues =
                                     visualStatus !== "warning" &&
                                     (targetStatus === "out" ||
                                       (isReworkMetric && issueTickets.length > 0) ||
                                       (isAdditionalInitiativesMetric && issueTickets.length > 0) ||
-                                      (isAiAdoptionMetric && issueTickets.length > 0));
+                                      (isAiAdoptionMetric && issueTickets.length > 0) ||
+                                      (isScopeChangeMetric && issueTickets.length > 0));
                                   const isExpanded = expandedSnapshotKeys.has(row.key);
 
                                   return (

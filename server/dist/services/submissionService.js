@@ -277,7 +277,7 @@ export async function listMySubmissions(userId, options) {
 }
 export async function listTeamSubmissions(managerId) {
     const reports = await prisma.user.findMany({
-        where: { managerId },
+        where: { managerId, isActive: true },
         select: { id: true },
     });
     const reportIds = reports.map((report) => report.id);
@@ -309,6 +309,7 @@ export async function listTeamSubmissions(managerId) {
 }
 export async function listAllSubmissions() {
     const submissions = await prisma.kpiSubmission.findMany({
+        where: { user: { isActive: true } },
         orderBy: { periodEnd: "desc" },
         include: {
             template: { include: { goals: { orderBy: { order: "asc" }, include: { metrics: { orderBy: { order: "asc" } } } } } },

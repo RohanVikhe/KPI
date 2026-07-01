@@ -60,7 +60,8 @@ type RawIssueType =
   | "late"
   | "notFtr"
   | "additionalInitiative"
-  | "aiAdoption";
+  | "aiAdoption"
+  | "scopeChange";
 
 type RawIssueColumns = {
   ticketId: number;
@@ -74,6 +75,7 @@ type RawIssueColumns = {
   postDefectFlag: number;
   postDefectCount: number;
   ftrFlag: number;
+  scopeChange: number;
 };
 
 function toUtcDateOnly(value: Date) {
@@ -266,6 +268,7 @@ function getRawIssueColumns(headers: string[]): RawIssueColumns {
     postDefectFlag: findByOptions([["pdd", "flag"], ["defect", "flag"]]),
     postDefectCount: findByOptions([["defect", "count"]]),
     ftrFlag: findByOptions([["ftr", "flag"], ["first", "time", "right"]]),
+    scopeChange: findByOptions([["scope", "change"]]),
   };
 }
 
@@ -285,6 +288,9 @@ function getIssueTypeForMetricKey(metricKey: string): RawIssueType | null {
   }
   if (normalized.includes("on_time_delivery") || normalized.includes("projects_on_time_budget")) {
     return "late";
+  }
+  if (normalized.includes("scope")) {
+    return "scopeChange";
   }
   return null;
 }
@@ -361,6 +367,9 @@ function collectIssueTicketsByMetricKey(
       const additionalInitiative = workType === "value add";
       const aiAdoption = workType === "ai adoption" || workType === "automation";
 
+      const scopeChangeFlag =
+        columns.scopeChange !== -1 ? parseBoolish(row[columns.scopeChange]) === true : false;
+
       const ticket = { id: ticketId, link: ticketLink };
 
       if (aiAdoption) addTicketForIssue("aiAdoption", ticket);
@@ -370,6 +379,7 @@ function collectIssueTicketsByMetricKey(
       if (rework) addTicketForIssue("rework", ticket);
       if (notFtr) addTicketForIssue("notFtr", ticket);
       if (late) addTicketForIssue("late", ticket);
+      if (scopeChangeFlag) addTicketForIssue("scopeChange", ticket);
     });
   });
 
@@ -605,14 +615,14 @@ export async function getUserAnalytics(userId: string, range?: AnalyticsDateRang
 async function resolveTeamUserIds(requesterId: string, requesterRole: Role) {
   if (requesterRole === Role.ADMIN) {
     const users = await prisma.user.findMany({
-      where: { role: { in: [Role.EMPLOYEE, Role.MANAGER] } },
+      where: { role: { in: [Role.EMPLOYEE, Role.MANAGER] }, isActive: true },
       select: { id: true },
     });
     return users.map((user) => user.id);
   }
 
   const reports = await prisma.user.findMany({
-    where: { managerId: requesterId },
+    where: { managerId: requesterId, isActive: true },
     select: { id: true },
   });
   return reports.map((report) => report.id);

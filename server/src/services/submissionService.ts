@@ -383,7 +383,7 @@ export async function listMySubmissions(
 
 export async function listTeamSubmissions(managerId: string) {
   const reports = await prisma.user.findMany({
-    where: { managerId },
+    where: { managerId, isActive: true },
     select: { id: true },
   });
 
@@ -418,6 +418,7 @@ export async function listTeamSubmissions(managerId: string) {
 
 export async function listAllSubmissions() {
   const submissions = await prisma.kpiSubmission.findMany({
+    where: { user: { isActive: true } },
     orderBy: { periodEnd: "desc" },
     include: {
       template: { include: { goals: { orderBy: { order: "asc" }, include: { metrics: { orderBy: { order: "asc" } } } } } },
