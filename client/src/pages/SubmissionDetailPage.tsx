@@ -155,11 +155,13 @@ export default function SubmissionDetailPage() {
       description: goal.description,
       score: goalScoreMap.get(goal.id) ?? null,
       note: goalNoteMap.get(goal.id) ?? null,
-      metrics: goal.metrics.map((metric) => ({
-        id: metric.id,
-        label: metric.label,
-        value: resolvedValues.get(metric.id) ?? null,
-      })),
+      metrics: goal.metrics
+        .filter((metric) => metric.key !== "schedule_adherence" && metric.key !== "process_compliance_rate")
+        .map((metric) => ({
+          id: metric.id,
+          label: metric.label,
+          value: resolvedValues.get(metric.id) ?? null,
+        })),
     }));
   }, [submission]);
 

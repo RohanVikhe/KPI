@@ -585,7 +585,8 @@ export default function DashboardPage() {
       submission.template.goals.forEach((goal, goalIndex) => {
         const goalKey = goal.key || goal.id;
         const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
-        const displayMetrics = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
+        const displayMetrics = (computedMetrics.length > 0 ? computedMetrics : goal.metrics)
+          .filter((metric) => metric.key !== "schedule_adherence" && metric.key !== "process_compliance_rate");
         if (!goalDefinitions.has(goalKey)) {
           goalDefinitions.set(goalKey, {
             key: goalKey,
@@ -699,7 +700,8 @@ export default function DashboardPage() {
       submission.template.goals.forEach((goal) => {
         const goalKey = goal.key || goal.id;
         const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
-        const displayMetrics = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
+        const displayMetrics = (computedMetrics.length > 0 ? computedMetrics : goal.metrics)
+          .filter((metric) => metric.key !== "schedule_adherence" && metric.key !== "process_compliance_rate");
         if (!goalDefinitions.has(goalKey)) {
           goalDefinitions.set(goalKey, {
             metrics: goal.metrics,

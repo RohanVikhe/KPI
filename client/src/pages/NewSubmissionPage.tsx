@@ -1612,13 +1612,15 @@ export default function NewSubmissionPage() {
                 </div>
               </div>
               <div className="metric-grid">
-                {goal.metrics.map((metric) => {
-                  const computedValue = metric.isComputed ? computedValues.get(metric.id) : null;
-                  return (
-                    <label
-                      className={`form-field${metric.isComputed ? " metric-computed" : ""}`}
-                      key={metric.id}
-                    >
+                {goal.metrics
+                  .filter((metric) => metric.key !== "schedule_adherence" && metric.key !== "process_compliance_rate")
+                  .map((metric) => {
+                    const computedValue = metric.isComputed ? computedValues.get(metric.id) : null;
+                    return (
+                      <label
+                        className={`form-field${metric.isComputed ? " metric-computed" : ""}`}
+                        key={metric.id}
+                      >
                       <span className="metric-label">
                         {metric.label} {!metric.isComputed && metric.required ? "*" : ""}
                         {metric.isComputed && <span className="metric-tag">Auto</span>}

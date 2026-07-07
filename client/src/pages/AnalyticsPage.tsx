@@ -397,7 +397,8 @@ export default function AnalyticsPage() {
     return activeTemplate.goals
       .map((goal) => {
         const computedMetrics = goal.metrics.filter((metric) => metric.isComputed);
-        const displayMetrics = computedMetrics.length > 0 ? computedMetrics : goal.metrics;
+        const displayMetrics = (computedMetrics.length > 0 ? computedMetrics : goal.metrics)
+          .filter((metric) => metric.key !== "schedule_adherence" && metric.key !== "process_compliance_rate");
         return {
           goalId: goal.id,
           name: goal.name,
@@ -442,6 +443,10 @@ export default function AnalyticsPage() {
   const memberGoalMetricProgress = teamMemberAnalytics?.goalMetricProgress ?? [];
   const metricGoalProgress = useMemo<GoalMetricProgressView[]>(() => {
     return memberGoalMetricProgress
+      .map((goal) => ({
+        ...goal,
+        metrics: goal.metrics.filter((metric) => metric.key !== "schedule_adherence" && metric.key !== "process_compliance_rate"),
+      }))
       .filter((goal) => goal.metrics.length > 0)
       .slice()
       .sort((a, b) => {
