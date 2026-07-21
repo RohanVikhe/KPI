@@ -369,6 +369,11 @@ function isReworkMetricKey(metricKey: string) {
   return normalized.includes("rework");
 }
 
+function isFtrMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("first_time_right") || normalized.includes("deliverables_accepted") || normalized.includes("ftr");
+}
+
 function isAiAdoptionMetricKey(metricKey: string) {
   const normalized = metricKey.toLowerCase();
   return normalized.includes("automation_adoption") || normalized.includes("qp_automated_projects");
@@ -817,7 +822,8 @@ export default function DashboardPage() {
       const includeBecauseRed = status === "out";
       const includeBecauseRework = isReworkMetricKey(row.key);
       const includeBecauseScope = isScopeChangeMetricKey(row.key);
-      if (!includeBecauseRed && !includeBecauseRework && !includeBecauseScope) return;
+      const includeBecauseFtr = isFtrMetricKey(row.key);
+      if (!includeBecauseRed && !includeBecauseRework && !includeBecauseScope && !includeBecauseFtr) return;
       const issueType = getIssueTypeForMetricKey(row.key);
       if (!issueType) return;
       const list = keysByIssueType.get(issueType) ?? [];
@@ -1288,12 +1294,14 @@ export default function DashboardPage() {
                 const isReworkMetric = isReworkMetricKey(row.key);
                 const isAiAdoptionMetric = isAiAdoptionMetricKey(row.key);
                 const isScopeChangeMetric = isScopeChangeMetricKey(row.key);
+                const isFtrMetric = isFtrMetricKey(row.key);
                 const canShowIssues =
                   visualStatus !== "warning" &&
                   (targetStatus === "out" ||
                     (isReworkMetric && issueTickets.length > 0) ||
                     (isAiAdoptionMetric && issueTickets.length > 0) ||
-                    (isScopeChangeMetric && issueTickets.length > 0));
+                    (isScopeChangeMetric && issueTickets.length > 0) ||
+                    (isFtrMetric && issueTickets.length > 0));
                 const isExpanded = expandedSnapshotKeys.has(row.key);
 
                 return (

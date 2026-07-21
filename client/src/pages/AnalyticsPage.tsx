@@ -325,6 +325,11 @@ function isReworkMetricKey(metricKey: string) {
   return normalized.includes("rework");
 }
 
+function isFtrMetricKey(metricKey: string) {
+  const normalized = metricKey.toLowerCase();
+  return normalized.includes("first_time_right") || normalized.includes("deliverables_accepted") || normalized.includes("ftr");
+}
+
 function isAdditionalInitiativesMetricKey(metricKey: string) {
   return metricKey.toLowerCase().includes("additional_initiatives");
 }
@@ -942,13 +947,15 @@ export default function AnalyticsPage() {
                                   const isAdditionalInitiativesMetric = isAdditionalInitiativesMetricKey(row.key);
                                   const isAiAdoptionMetric = isAiAdoptionMetricKey(row.key);
                                   const isScopeChangeMetric = isScopeChangeMetricKey(row.key);
+                                  const isFtrMetric = isFtrMetricKey(row.key);
                                   const canShowIssues =
                                     visualStatus !== "warning" &&
                                     (targetStatus === "out" ||
                                       (isReworkMetric && issueTickets.length > 0) ||
                                       (isAdditionalInitiativesMetric && issueTickets.length > 0) ||
                                       (isAiAdoptionMetric && issueTickets.length > 0) ||
-                                      (isScopeChangeMetric && issueTickets.length > 0));
+                                      (isScopeChangeMetric && issueTickets.length > 0) ||
+                                      (isFtrMetric && issueTickets.length > 0));
                                   const isExpanded = expandedSnapshotKeys.has(row.key);
 
                                   return (
